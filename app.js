@@ -23,17 +23,47 @@ var MAX_GENERATIONS = 10;
 var REVIEW_MS = 3500;                    // reviewing phase: auto-advance once a winner exists
 var COMPOSITE_GAP = 24;                  // px gap between photo and portrait in the done composite
 
+// ─── Constants: AI judge (Task 6, spec §4) ───
+
+var PROVIDERS = ['gemini', 'openai', 'claude'];
+var PROVIDER_LABELS = { gemini: 'Gemini', openai: 'OpenAI', claude: 'Claude' };
+var MODELS = { gemini: 'gemini-2.5-flash', openai: 'gpt-4o', claude: 'claude-sonnet-5' };
+var JUDGE_RETRY_MS = 1500;               // judge failure path (spec §6): retry once after this delay
+var MAX_HINTS_REQUESTED = 4;             // prompt-side cap; the sanitizer itself does not truncate the list
+
+/* trait vocabulary the prompt hands the model, read straight off Genome.HINT_MAP's
+   keys so the prompt, the sanitizer (genome.js) and hintsToGenes() can never drift apart. */
+var TRAIT_LIST = Object.keys(window.Genome.HINT_MAP);
+
+var JUDGE_PROMPT = 'You are comparing a reference photo (the first image) to a 3x3 grid of 9 ' +
+  'hand-drawn sketch portraits (the second image; each cell has a number 1-9 in a badge in its ' +
+  'corner). Pick the single sketch whose age, gender presentation, hair, glasses, facial hair and ' +
+  'overall vibe best match the person in the photo. Then give at most ' + MAX_HINTS_REQUESTED +
+  ' hints for how the next generation of sketches could look more like the person, using ONLY ' +
+  'these trait names: ' + TRAIT_LIST.join(', ') + '. ' +
+  'Respond with ONLY this JSON object and nothing else - no markdown fencing, no commentary: ' +
+  '{ "best": <integer 1-9>, "hints": [ { "trait": "<one of the trait names above>", ' +
+  '"suggestion": "<short phrase>" } ] }';
+
 // ─── State ───
+
+var initialSettings = loadSettings(); // localStorage['draw.settings'] + ['draw.keys'], sane defaults on any failure
 
 var App = {
   state: {
     state: 'idle',        // idle | ready | running | done
     phase: null,           // null | drawing | judging | reviewing | paused
-    provider: 'gemini',    // placeholder until Task 6 settings panel
+    provider: initialSettings.provider,   // 'gemini' | 'openai' | 'claude'
+    models: initialSettings.models,       // { gemini, openai, claude } model name text
+    keys: initialSettings.keys,           // { gemini, openai, claude } API key text – never logged
+    settingsHighlight: false,             // true right after a blocked Start (missing key)
+    settingsError: null,                  // message shown in the settings panel
+    runError: null,                       // judge-failure message shown while phase === 'paused'
     generation: 0,
     population: null,      // array of 9 genomes, current generation
     winner: null,           // 1-9 or null
     winnerSource: null,     // 'ai' | 'manual' | null
+    winnerHints: [],         // [{trait, suggestion}] from the AI judge that picked winner (kept across a manual override)
     log: [],
     error: null,
     photo: null,             // { previewUrl, jpegDataUrl, width, height } | null
@@ -64,6 +94,11 @@ var App = {
 var reviewTimerId = null;
 var reviewDeadline = null;     // Date.now() timestamp the timer will fire at, or null
 var reviewRemainingMs = null;  // ms left when Pause froze a running timer, or null
+
+/* judge retry timer (spec §6) – same "runtime-only, not App.state" reasoning as the
+   review timer above: a plain closure var so it can never leak across a re-render,
+   and is explicitly cleared by finishRun() so Stop can never let a stale retry fire. */
+var judgeRetryTimerId = null;
 
 // ─── DOM refs ───
 
@@ -179,6 +214,189 @@ function buildGridJpeg(population) {
   return composite.toDataURL('image/jpeg', 0.85);
 }
 
+// ─── Helpers: settings persistence (spec §4.4) ───
+
+/* loadSettings() -> { provider, models, keys }, read from localStorage['draw.settings']
+   (provider + models) and localStorage['draw.keys'] (JSON object of key strings per
+   provider). Tolerant of missing/corrupt storage or a disabled localStorage – always
+   returns a complete, valid object built from MODELS defaults. Never throws, never logs
+   the key values it finds. */
+function loadSettings() {
+  var provider = 'gemini';
+  var models = { gemini: MODELS.gemini, openai: MODELS.openai, claude: MODELS.claude };
+  var keys = { gemini: '', openai: '', claude: '' };
+  try {
+    var rawSettings = window.localStorage.getItem('draw.settings');
+    if (rawSettings) {
+      var parsedSettings = JSON.parse(rawSettings);
+      if (parsedSettings && typeof parsedSettings === 'object') {
+        if (PROVIDERS.indexOf(parsedSettings.provider) >= 0) provider = parsedSettings.provider;
+        if (parsedSettings.models && typeof parsedSettings.models === 'object') {
+          PROVIDERS.forEach(function (p) {
+            if (typeof parsedSettings.models[p] === 'string' && parsedSettings.models[p]) {
+              models[p] = parsedSettings.models[p];
+            }
+          });
+        }
+      }
+    }
+    var rawKeys = window.localStorage.getItem('draw.keys');
+    if (rawKeys) {
+      var parsedKeys = JSON.parse(rawKeys);
+      if (parsedKeys && typeof parsedKeys === 'object') {
+        PROVIDERS.forEach(function (p) {
+          if (typeof parsedKeys[p] === 'string') keys[p] = parsedKeys[p];
+        });
+      }
+    }
+  } catch (e) {
+    // corrupt JSON or localStorage unavailable – fall back to the defaults above
+  }
+  return { provider: provider, models: models, keys: keys };
+}
+
+function saveSettings() {
+  try {
+    window.localStorage.setItem('draw.settings', JSON.stringify({
+      provider: App.state.provider,
+      models: App.state.models,
+    }));
+  } catch (e) {
+    // storage full/unavailable – settings just won't persist across reload
+  }
+}
+
+function saveKeys() {
+  try {
+    window.localStorage.setItem('draw.keys', JSON.stringify(App.state.keys));
+  } catch (e) {
+    // storage full/unavailable – keys just won't persist across reload
+  }
+}
+
+function hasKey(provider) {
+  var key = App.state.keys[provider];
+  return typeof key === 'string' && key.trim().length > 0;
+}
+
+// ─── Helpers: AI judge adapters (spec §4.4) ───
+
+function dataUrlToBase64(dataUrl) {
+  var i = dataUrl.indexOf(',');
+  return i >= 0 ? dataUrl.slice(i + 1) : dataUrl;
+}
+
+/* judge(provider, model, key, photoDataUrl, gridDataUrl) -> Promise<string> (raw model
+   text). One adapter per provider behind this single interface; every adapter rejects
+   with a short, non-key-leaking Error on a non-2xx response or an unreadable body. */
+function judge(provider, model, key, photoDataUrl, gridDataUrl) {
+  if (provider === 'gemini') return judgeGemini(model, key, photoDataUrl, gridDataUrl);
+  if (provider === 'openai') return judgeOpenAI(model, key, photoDataUrl, gridDataUrl);
+  if (provider === 'claude') return judgeClaude(model, key, photoDataUrl, gridDataUrl);
+  return Promise.reject(new Error('Unknown provider: ' + provider));
+}
+
+function judgeGemini(model, key, photoDataUrl, gridDataUrl) {
+  var url = 'https://generativelanguage.googleapis.com/v1beta/models/' +
+    encodeURIComponent(model) + ':generateContent';
+  var body = {
+    contents: [{
+      parts: [
+        { text: JUDGE_PROMPT },
+        { inline_data: { mime_type: 'image/jpeg', data: dataUrlToBase64(photoDataUrl) } },
+        { inline_data: { mime_type: 'image/jpeg', data: dataUrlToBase64(gridDataUrl) } },
+      ],
+    }],
+  };
+  return fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+    body: JSON.stringify(body),
+  }).then(function (res) {
+    if (!res.ok) {
+      return res.text().then(function (t) {
+        throw new Error('Gemini request failed (' + res.status + '): ' + t.slice(0, 200));
+      });
+    }
+    return res.json();
+  }).then(function (data) {
+    var parts = data && data.candidates && data.candidates[0] && data.candidates[0].content &&
+      data.candidates[0].content.parts;
+    var text = parts && parts[0] && parts[0].text;
+    if (typeof text !== 'string') throw new Error('Gemini reply had no text.');
+    return text;
+  });
+}
+
+function judgeOpenAI(model, key, photoDataUrl, gridDataUrl) {
+  var url = 'https://api.openai.com/v1/chat/completions';
+  var body = {
+    model: model,
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'text', text: JUDGE_PROMPT },
+        { type: 'image_url', image_url: { url: photoDataUrl } },
+        { type: 'image_url', image_url: { url: gridDataUrl } },
+      ],
+    }],
+  };
+  return fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key },
+    body: JSON.stringify(body),
+  }).then(function (res) {
+    if (!res.ok) {
+      return res.text().then(function (t) {
+        throw new Error('OpenAI request failed (' + res.status + '): ' + t.slice(0, 200));
+      });
+    }
+    return res.json();
+  }).then(function (data) {
+    var text = data && data.choices && data.choices[0] && data.choices[0].message &&
+      data.choices[0].message.content;
+    if (typeof text !== 'string') throw new Error('OpenAI reply had no text.');
+    return text;
+  });
+}
+
+function judgeClaude(model, key, photoDataUrl, gridDataUrl) {
+  var url = 'https://api.anthropic.com/v1/messages';
+  var body = {
+    model: model,
+    max_tokens: 500,
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'text', text: JUDGE_PROMPT },
+        { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: dataUrlToBase64(photoDataUrl) } },
+        { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: dataUrlToBase64(gridDataUrl) } },
+      ],
+    }],
+  };
+  return fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': key,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true',
+    },
+    body: JSON.stringify(body),
+  }).then(function (res) {
+    if (!res.ok) {
+      return res.text().then(function (t) {
+        throw new Error('Claude request failed (' + res.status + '): ' + t.slice(0, 200));
+      });
+    }
+    return res.json();
+  }).then(function (data) {
+    var text = data && data.content && data.content[0] && data.content[0].text;
+    if (typeof text !== 'string') throw new Error('Claude reply had no text.');
+    return text;
+  });
+}
+
 /* makeLogEntry(gen, best, source, hints, detail) – pure, does not touch state; callers
    combine the returned entry into the same App.set() that also advances the run, so a
    generation's log line and its state transition land in a single re-render. */
@@ -203,7 +421,70 @@ function startReviewTimer(ms) {
   reviewTimerId = window.setTimeout(advanceGeneration, wait);
 }
 
+// ─── Helpers: judge retry timer (spec §6) ───
+
+function clearJudgeRetryTimer() {
+  if (judgeRetryTimerId !== null) { window.clearTimeout(judgeRetryTimerId); judgeRetryTimerId = null; }
+}
+
 // ─── Helpers: GA loop ───
+
+/* beginJudging() – enters phase 'judging' for the population already in state and
+   fires the first judge attempt. Called right after Start builds generation 1, and
+   again by advanceGeneration() after building each following generation. */
+function beginJudging() {
+  App.set({ phase: 'judging', runError: null });
+  runJudge(0);
+}
+
+/* runJudge(attempt) – calls the configured provider's adapter, sanitizes the reply,
+   and on success sets the AI's pick (source 'ai') with its hints, then starts the
+   review timer. attempt is 0 for the first try, 1 for the single retry (spec §6).
+   Every branch re-checks App.state.phase === 'judging' before touching state, so a
+   Stop/Pause/New-photo that raced ahead of a slow network response is a silent no-op
+   instead of clobbering whatever the user already moved on to. */
+function runJudge(attempt) {
+  var s = App.state;
+  var provider = s.provider;
+  var model = s.models[provider];
+  var key = s.keys[provider];
+  var gridJpeg = buildGridJpeg(s.population);
+  var photoJpeg = s.photo.jpegDataUrl;
+
+  judge(provider, model, key, photoJpeg, gridJpeg).then(function (text) {
+    if (App.state.phase !== 'judging') return; // raced by Stop/Pause/reset – drop it
+    var parsed = window.Genome.sanitizeJudgeReply(text);
+    if (!parsed) {
+      handleJudgeFailure(attempt, 'The judge reply could not be understood.');
+      return;
+    }
+    App.set({
+      winner: parsed.best,
+      winnerSource: 'ai',
+      winnerHints: parsed.hints,
+      phase: 'reviewing',
+      runError: null,
+    });
+    startReviewTimer();
+  }).catch(function (err) {
+    if (App.state.phase !== 'judging') return; // raced by Stop/Pause/reset – drop it
+    handleJudgeFailure(attempt, (err && err.message) ? err.message : 'The judge request failed.');
+  });
+}
+
+/* handleJudgeFailure(attempt, message) (spec §6): attempt 0 schedules the single
+   retry after JUDGE_RETRY_MS; attempt 1 (the retry itself failed too) enters
+   'paused' with the message so the run keeps going manually. */
+function handleJudgeFailure(attempt, message) {
+  if (attempt === 0) {
+    judgeRetryTimerId = window.setTimeout(function () {
+      judgeRetryTimerId = null;
+      if (App.state.phase === 'judging') runJudge(1);
+    }, JUDGE_RETRY_MS);
+    return;
+  }
+  App.set({ phase: 'paused', runError: message + ' Pick manually to continue.' });
+}
 
 /* buildPortraitCanvas(genome) -> canvas rendered at 2x cell resolution. renderGenome
    scales its strokes to the canvas it is given, so a bigger canvas re-renders sharper
@@ -245,6 +526,7 @@ function buildComposite(photo, portraitCanvas, callback) {
    log entry, flips state to 'done', then builds the side-by-side composite async. */
 function finishRun(winnerIndex, entry) {
   clearReviewTimer();
+  clearJudgeRetryTimer(); // a judge retry must never fire after the run has already ended
   var s = App.state;
   var genome = s.population[winnerIndex - 1];
   var portraitCanvas = buildPortraitCanvas(genome);
@@ -254,10 +536,11 @@ function finishRun(winnerIndex, entry) {
     state: 'done',
     phase: null,
     winner: winnerIndex,
-    winnerSource: 'manual',
+    winnerSource: entry.source,
     doneGenome: genome,
     portraitDataUrl: portraitDataUrl,
     compositeDataUrl: null,
+    runError: null,
     log: s.log.concat([entry]),
   });
 
@@ -277,7 +560,8 @@ function advanceGeneration() {
 
   var winnerIndex = s.winner;
   var winnerGenome = s.population[winnerIndex - 1];
-  var entry = makeLogEntry(s.generation, winnerIndex, 'manual', []);
+  var hints = s.winnerHints || [];
+  var entry = makeLogEntry(s.generation, winnerIndex, s.winnerSource || 'manual', hints);
 
   if (s.generation >= MAX_GENERATIONS) {
     finishRun(winnerIndex, entry);
@@ -285,15 +569,18 @@ function advanceGeneration() {
   }
 
   var nextGen = s.generation + 1;
-  var nextPopulation = window.Genome._internal.nextPopulation(winnerGenome, nextGen, new Map(), Math.random);
+  var hintedGenes = window.Genome.hintsToGenes(hints); // §4.2: winner's hints boost these genes in the mutants below
+  var nextPopulation = window.Genome._internal.nextPopulation(winnerGenome, nextGen, hintedGenes, Math.random);
   App.set({
     generation: nextGen,
     population: nextPopulation,
     winner: null,
     winnerSource: null,
-    phase: 'reviewing',
+    winnerHints: [],
+    phase: 'drawing',
     log: s.log.concat([entry]),
   });
+  beginJudging();
 }
 
 // ─── Render ───
@@ -359,16 +646,60 @@ function renderLeftColumn(s) {
 
   col.appendChild(panel);
 
-  // ── settings panel (placeholder; real settings land in Task 6) ──
-  var settings = el('div', { class: 'panel' });
-  settings.appendChild(el('h2', { text: 'Settings' }));
-  settings.appendChild(el('p', {
-    class: 'settings-placeholder',
-    text: 'Provider: ' + s.provider + ' (selector and API keys arrive in a later task).',
-  }));
-  col.appendChild(settings);
+  col.appendChild(renderSettingsPanel(s));
 
   return col;
+}
+
+/* renderSettingsPanel(s) – provider select, that provider's model + key inputs
+   (prefilled from MODELS / localStorage), a "keys stay in this browser" note, and
+   (when Start was just blocked for a missing key) a highlighted border + message. */
+function renderSettingsPanel(s) {
+  var panel = el('div', {
+    class: 'panel settings-panel' + (s.settingsHighlight ? ' is-highlighted' : ''),
+  });
+  panel.appendChild(el('h2', { text: 'Settings' }));
+
+  var providerRow = el('div', { class: 'settings-row' });
+  providerRow.appendChild(el('label', { for: 'settings-provider', text: 'Provider' }));
+  var select = el('select', { id: 'settings-provider' });
+  PROVIDERS.forEach(function (p) {
+    var opt = el('option', { value: p, text: PROVIDER_LABELS[p] });
+    if (p === s.provider) opt.setAttribute('selected', 'selected');
+    select.appendChild(opt);
+  });
+  select.addEventListener('change', function () { onProviderChange(select.value); });
+  providerRow.appendChild(select);
+  panel.appendChild(providerRow);
+
+  var modelRow = el('div', { class: 'settings-row' });
+  modelRow.appendChild(el('label', { for: 'settings-model', text: 'Model' }));
+  var modelInput = el('input', { id: 'settings-model', type: 'text', autocomplete: 'off' });
+  modelInput.value = s.models[s.provider];
+  modelInput.addEventListener('change', function () { onModelChange(modelInput.value); });
+  modelRow.appendChild(modelInput);
+  panel.appendChild(modelRow);
+
+  var keyRow = el('div', { class: 'settings-row' });
+  keyRow.appendChild(el('label', { for: 'settings-key', text: PROVIDER_LABELS[s.provider] + ' API key' }));
+  var keyInput = el('input', {
+    id: 'settings-key', type: 'password', autocomplete: 'off', spellcheck: 'false',
+  });
+  keyInput.value = s.keys[s.provider];
+  keyInput.addEventListener('change', function () { onKeyChange(keyInput.value); });
+  keyRow.appendChild(keyInput);
+  panel.appendChild(keyRow);
+
+  panel.appendChild(el('p', {
+    class: 'settings-note',
+    text: 'Keys stay in this browser (saved to localStorage) and are sent only to the selected provider.',
+  }));
+
+  if (s.settingsError) {
+    panel.appendChild(el('p', { class: 'settings-error', text: s.settingsError }));
+  }
+
+  return panel;
 }
 
 function renderCenterColumn(s) {
@@ -399,9 +730,17 @@ function renderCenterColumn(s) {
 
   var status = el('span', { class: 'review-status' });
   if (s.state === 'running') {
-    if (s.phase === 'paused') status.textContent = 'Paused';
-    else if (s.winner) status.textContent = 'Winner picked – advancing soon (press Enter now)';
-    else status.textContent = 'Pick a candidate: click a cell or press 1-9';
+    if (s.phase === 'judging') {
+      status.appendChild(el('span', { class: 'judging-indicator', 'aria-hidden': 'true' }));
+      status.appendChild(document.createTextNode('Judge is looking at the grid…'));
+    } else if (s.phase === 'paused') {
+      status.textContent = s.runError ? s.runError : (s.winner ? 'Paused – press Resume to continue' : 'Paused – pick a candidate, then Resume');
+    } else if (s.winner) {
+      status.textContent = 'Winner picked' + (s.winnerSource === 'ai' ? ' by the judge' : '') +
+        ' – advancing soon (press Enter now)';
+    } else {
+      status.textContent = 'Pick a candidate: click a cell or press 1-9';
+    }
   }
 
   bar.appendChild(startBtn);
@@ -528,9 +867,13 @@ function renderRightColumn(s) {
       'data-source': entry.source,
       'data-hints': String((entry.hints || []).length),
     });
+    var hintsText = entry.hints && entry.hints.length
+      ? entry.hints.map(function (h) { return h.trait + ': ' + h.suggestion; }).join(', ')
+      : 'none';
+    /* textContent only – never innerHTML – so a malformed/adversarial hint suggestion
+       (already truncated + trait-filtered by the sanitizer) can never inject markup. */
     line.textContent = 'Gen ' + entry.gen + ' – best ' + entry.best + ' (' + entry.source + ')' +
-      ' – hints: ' + (entry.hints && entry.hints.length ? entry.hints.join(', ') : 'none') +
-      (entry.detail ? ' – ' + entry.detail : '');
+      ' – hints: ' + hintsText + (entry.detail ? ' – ' + entry.detail : '');
     log.appendChild(line);
   });
   panel.appendChild(log);
@@ -553,26 +896,38 @@ function handlePhotoFile(file) {
 
 function onStartClick() {
   if (App.state.state !== 'ready') return;
+  var provider = App.state.provider;
+  if (!hasKey(provider)) {
+    App.set({
+      settingsHighlight: true,
+      settingsError: 'Add an API key for ' + PROVIDER_LABELS[provider] + ' to start a run.',
+    });
+    return;
+  }
   var population = window.Genome.initialPopulation(Math.random);
   App.set({
     state: 'running',
-    phase: 'reviewing',
+    phase: 'drawing',
     generation: 1,
     population: population,
     winner: null,
     winnerSource: null,
+    winnerHints: [],
+    runError: null,
+    settingsHighlight: false,
+    settingsError: null,
   });
+  beginJudging();
 }
 
 function onPauseResumeClick() {
   var s = App.state;
   if (s.state !== 'running') return;
   if (s.phase === 'paused') {
-    if (s.winner && reviewRemainingMs !== null) {
-      startReviewTimer(reviewRemainingMs);
-      reviewRemainingMs = null;
-    }
-    App.set({ phase: 'reviewing' });
+    var resumeMs = reviewRemainingMs;
+    reviewRemainingMs = null;
+    if (s.winner) startReviewTimer(resumeMs === null ? undefined : resumeMs);
+    App.set({ phase: 'reviewing', runError: null });
   } else if (s.phase === 'reviewing') {
     if (s.winner && reviewTimerId !== null) {
       reviewRemainingMs = Math.max(0, reviewDeadline - Date.now());
@@ -586,27 +941,34 @@ function onStopClick() {
   var s = App.state;
   if (s.state !== 'running') return;
   var winnerIndex = s.winner || 1; // no pick yet: fall back to cell 1 as "current best"
-  var entry = makeLogEntry(s.generation, winnerIndex, 'manual', [],
+  var source = s.winner ? (s.winnerSource || 'manual') : 'manual';
+  var hints = s.winner ? (s.winnerHints || []) : [];
+  var entry = makeLogEntry(s.generation, winnerIndex, source, hints,
     s.winner ? 'stopped' : 'stopped before a pick – used cell 1');
   finishRun(winnerIndex, entry);
 }
 
 function onCellPick(index) {
   var s = App.state;
-  if (s.state !== 'running' || s.phase !== 'reviewing') return;
+  // pickable while actively reviewing an AI/manual pick, and while paused (spec §6:
+  // a judge failure pauses the run and waits for exactly this manual pick + Resume)
+  if (s.state !== 'running' || (s.phase !== 'reviewing' && s.phase !== 'paused')) return;
   if (!s.population || index < 1 || index > s.population.length) return;
+  // overriding a pick keeps whatever hints the AI already produced this generation –
+  // only the winner + its source change, winnerHints is left untouched
   App.set({ winner: index, winnerSource: 'manual' });
-  startReviewTimer(); // (re)start the full REVIEW_MS window on every pick, including overrides
+  if (s.phase === 'reviewing') startReviewTimer(); // (re)start the full REVIEW_MS window on every pick, including overrides
 }
 
 function onStartOverClick() {
   // same photo, fresh gen 1: reuse the photo already in state, drop everything else,
   // then run the exact Start path so gen 1 gets a brand-new initialPopulation()
   clearReviewTimer();
+  clearJudgeRetryTimer();
   reviewRemainingMs = null;
   App.set({
     state: 'ready', phase: null, population: null, generation: 0,
-    winner: null, winnerSource: null, log: [], error: null,
+    winner: null, winnerSource: null, winnerHints: [], runError: null, log: [], error: null,
     doneGenome: null, portraitDataUrl: null, compositeDataUrl: null,
   });
   onStartClick();
@@ -614,12 +976,39 @@ function onStartOverClick() {
 
 function onNewPhotoClick() {
   clearReviewTimer();
+  clearJudgeRetryTimer();
   reviewRemainingMs = null;
   App.set({
     state: 'idle', phase: null, population: null, generation: 0,
-    winner: null, winnerSource: null, log: [], error: null, photo: null,
+    winner: null, winnerSource: null, winnerHints: [], runError: null, log: [], error: null, photo: null,
     doneGenome: null, portraitDataUrl: null, compositeDataUrl: null,
   });
+}
+
+// ─── Listeners: settings panel ───
+
+function onProviderChange(provider) {
+  if (PROVIDERS.indexOf(provider) < 0) return;
+  App.set({ provider: provider, settingsHighlight: false, settingsError: null });
+  saveSettings();
+}
+
+function onModelChange(value) {
+  var s = App.state;
+  var models = {};
+  for (var k in s.models) if (Object.prototype.hasOwnProperty.call(s.models, k)) models[k] = s.models[k];
+  models[s.provider] = value;
+  App.set({ models: models });
+  saveSettings();
+}
+
+function onKeyChange(value) {
+  var s = App.state;
+  var keys = {};
+  for (var k in s.keys) if (Object.prototype.hasOwnProperty.call(s.keys, k)) keys[k] = s.keys[k];
+  keys[s.provider] = value;
+  App.set({ keys: keys, settingsHighlight: false, settingsError: null });
+  saveKeys(); // never logged – written straight to localStorage
 }
 
 // ─── Init ───
@@ -642,9 +1031,9 @@ function onNewPhotoClick() {
   // winner exists. Bound once here (not per-render) so listeners never pile up.
   window.addEventListener('keydown', function (ev) {
     var tag = (ev.target && ev.target.tagName) || '';
-    if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
     var s = App.state;
-    if (s.state !== 'running' || s.phase !== 'reviewing') return;
+    if (s.state !== 'running' || (s.phase !== 'reviewing' && s.phase !== 'paused')) return;
     if (ev.key >= '1' && ev.key <= '9') {
       var idx = parseInt(ev.key, 10);
       if (s.population && idx <= s.population.length) {

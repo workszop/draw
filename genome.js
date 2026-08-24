@@ -555,6 +555,67 @@
     return map;
   }
 
+  // ─── Helpers: judge reply sanitizer (spec §4.3, Task 6) ───
+
+  var MAX_HINT_SUGGESTION_CHARS = 80;
+
+  /* extractFirstJsonObject(text) -> the substring of the first balanced {...} block,
+     or null if text isn't a string or has no balanced brace pair. A balanced-brace
+     scan (not a greedy regex) so a reply like `{"a":{"b":1}} trailing junk` still
+     extracts exactly the outer object and stops at its matching close brace. */
+  function extractFirstJsonObject(text) {
+    if (typeof text !== 'string') return null;
+    var start = text.indexOf('{');
+    while (start !== -1) {
+      var depth = 0;
+      for (var i = start; i < text.length; i++) {
+        var ch = text.charAt(i);
+        if (ch === '{') depth++;
+        else if (ch === '}') {
+          depth--;
+          if (depth === 0) return text.slice(start, i + 1);
+        }
+      }
+      start = text.indexOf('{', start + 1);           // this '{' never closed – try the next one
+    }
+    return null;
+  }
+
+  /* sanitizeJudgeReply(text) (spec §4.3) -> { best, hints } | null. Pure, Node-testable,
+     exposed on the Genome namespace (not just app.js) so probes and Node tests reach it
+     without a DOM. `best` must be an integer 1-9 or the WHOLE reply is rejected (null).
+     `hints` is filtered to the known HINT_MAP trait vocabulary, and every suggestion is
+     coerced to a string and truncated to 80 chars. Never eval's anything; callers must
+     still render hints via textContent only, never innerHTML. */
+  function sanitizeJudgeReply(text) {
+    var block = extractFirstJsonObject(text);
+    if (!block) return null;
+    var obj;
+    try { obj = JSON.parse(block); } catch (e) { return null; }
+    if (!obj || typeof obj !== 'object') return null;
+
+    var best = obj.best;
+    if (typeof best !== 'number' || !isFinite(best) || Math.floor(best) !== best || best < 1 || best > 9) {
+      return null;
+    }
+
+    var hints = [];
+    if (Array.isArray(obj.hints)) {
+      for (var i = 0; i < obj.hints.length; i++) {
+        var h = obj.hints[i];
+        if (!h || typeof h !== 'object') continue;
+        if (typeof h.trait !== 'string' || !Object.prototype.hasOwnProperty.call(HINT_MAP, h.trait)) continue;
+        var suggestion;
+        if (typeof h.suggestion === 'string') suggestion = h.suggestion;
+        else if (h.suggestion === null || h.suggestion === undefined) suggestion = '';
+        else suggestion = String(h.suggestion);
+        hints.push({ trait: h.trait, suggestion: suggestion.slice(0, MAX_HINT_SUGGESTION_CHARS) });
+      }
+    }
+
+    return { best: best, hints: hints };
+  }
+
   // ─── Helpers: generation 1 ───
 
   function checkStratification(pop) {
@@ -1384,6 +1445,7 @@
     mutate: mutate,
     HINT_MAP: HINT_MAP,
     hintsToGenes: hintsToGenes,
+    sanitizeJudgeReply: sanitizeJudgeReply,
     initialPopulation: initialPopulation,
     /* the one member outside the namespace contract: shared utilities the dev pages,
        the probes and the Node checks may lean on. Not part of the app's public surface. */

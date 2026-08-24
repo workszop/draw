@@ -150,12 +150,62 @@
     };
   }
 
+  /* probe 5 (§7.4, §4.3): sanitizeJudgeReply() fixtures – valid reply; garbage text;
+     out-of-range best; unknown traits mixed with known; JSON embedded in prose. Each
+     fixture's actual result is compared to its expected result by JSON.stringify. */
+  function sanitizerFixtures() {
+    var sanitize = window.Genome.sanitizeJudgeReply;
+    var fixtures = [
+      {
+        name: 'valid reply',
+        text: '{"best": 3, "hints": [{"trait": "hair_color", "suggestion": "darker"}]}',
+        expected: { best: 3, hints: [{ trait: 'hair_color', suggestion: 'darker' }] },
+      },
+      {
+        name: 'garbage text',
+        text: 'this is not json at all',
+        expected: null,
+      },
+      {
+        name: 'best out of range (12)',
+        text: '{"best": 12, "hints": []}',
+        expected: null,
+      },
+      {
+        name: 'unknown traits mixed with known',
+        text: '{"best": 5, "hints": [{"trait":"hair_color","suggestion":"darker"},' +
+          '{"trait":"bogus_trait","suggestion":"whatever"}]}',
+        expected: { best: 5, hints: [{ trait: 'hair_color', suggestion: 'darker' }] },
+      },
+      {
+        name: 'JSON embedded in prose',
+        text: 'Sure! Here is my answer: {"best": 7, "hints": [{"trait":"glasses","suggestion":"add"}]} Hope that helps.',
+        expected: { best: 7, hints: [{ trait: 'glasses', suggestion: 'add' }] },
+      },
+    ];
+    var fails = [];
+    for (var i = 0; i < fixtures.length; i++) {
+      var f = fixtures[i];
+      var actual = sanitize(f.text);
+      if (JSON.stringify(actual) !== JSON.stringify(f.expected)) {
+        fails.push(f.name + ': got ' + JSON.stringify(actual) + ', expected ' + JSON.stringify(f.expected));
+      }
+    }
+    return {
+      pass: fails.length === 0,
+      detail: fails.length === 0
+        ? 'all ' + fixtures.length + ' sanitizer fixtures parsed to their expected result'
+        : fails.join(' | '),
+    };
+  }
+
   /* every check carries its descriptive name, so a thrower still reports under it */
   var CHECKS = [
     { name: 'determinism: same genome renders identically', fn: determinism },
     { name: 'repair validity: 500 mutations all repair-idempotent', fn: repairValidity },
     { name: 'stratification: 50 initialPopulation() calls satisfy §3.5', fn: stratification },
     { name: 'elitism: cell 1 hash equals previous winner across 3 generations', fn: elitism },
+    { name: 'sanitizer: 5 fixture replies parse to expected results', fn: sanitizerFixtures },
   ];
 
   var Probes = {
