@@ -87,6 +87,8 @@ var App = {
     winner: null,           // 1-9 or null
     winnerSource: null,     // 'ai' | 'manual' | null
     winnerHints: [],         // [{trait, suggestion}] from the AI judge that picked winner (kept across a manual override)
+    currentBestGenome: null, // Phase 10: previous generation's picked winner genome; no grid cell is guaranteed to equal
+                              // it any more (no exact elite), so this is the Stop-before-pick fallback (see onStopClick)
     log: [],
     error: null,
     photo: null,             // { previewUrl, jpegDataUrl, width, height } | null
@@ -737,7 +739,10 @@ function finishRun(winnerIndex, entry) {
   clearJudgeRetryTimer(); // a judge retry must never fire after the run has already ended
   judgeEpoch++; // invalidate any judge Promise still in flight (Stop mid-'judging')
   var s = App.state;
-  var genome = s.population[winnerIndex - 1];
+  // entry.genome is authoritative (Phase 10: onStopClick's before-a-pick fallback
+  // genome may not live in s.population[winnerIndex - 1] at all any more); fall back
+  // to the population lookup only if a caller somehow omitted it.
+  var genome = entry.genome || s.population[winnerIndex - 1];
   var portraitCanvas = buildPortraitCanvas(genome);
   var portraitDataUrl = portraitCanvas.toDataURL('image/png');
 
@@ -759,9 +764,13 @@ function finishRun(winnerIndex, entry) {
   });
 }
 
-/* advanceGeneration() – the winner becomes cell 1 (exact elite copy) of generation g+1;
-   cells 2-9 are Genome._internal.nextPopulation's mutants. Fires on REVIEW_MS timeout
-   or an immediate 'enter'. At MAX_GENERATIONS the run ends instead of building g+1. */
+/* advanceGeneration() – the winner seeds generation g+1's population via
+   Genome._internal.nextPopulation: 6 guaranteed-different mutants of the winner + 3
+   random immigrants, shuffled, with NO exact copy of the winner in the grid (Phase 10 –
+   the old exact-elite cell 1 stagnated the judge into re-picking the identical image).
+   The winner genome itself is kept as currentBestGenome, the Stop-before-pick fallback
+   (see onStopClick). Fires on REVIEW_MS timeout or an immediate 'enter'. At
+   MAX_GENERATIONS the run ends instead of building g+1. */
 function advanceGeneration() {
   var s = App.state;
   if (s.state !== 'running' || s.phase !== 'reviewing' || !s.winner) return;
@@ -779,10 +788,11 @@ function advanceGeneration() {
 
   var nextGen = s.generation + 1;
   var hintedGenes = window.Genome.hintsToGenes(hints); // §4.2: winner's hints boost these genes in the mutants below
-  var nextPopulation = window.Genome._internal.nextPopulation(winnerGenome, nextGen, hintedGenes, Math.random);
+  var built = window.Genome._internal.nextPopulation(winnerGenome, nextGen, hintedGenes, Math.random);
   App.set({
     generation: nextGen,
-    population: nextPopulation,
+    population: built.population,
+    currentBestGenome: winnerGenome, // Stop-before-pick fallback (onStopClick) – no grid cell is guaranteed to match it any more
     winner: null,
     winnerSource: null,
     winnerHints: [],
@@ -1324,6 +1334,7 @@ function onStartClick() {
     winner: null,
     winnerSource: null,
     winnerHints: [],
+    currentBestGenome: null,
     runError: null,
     settingsHighlight: false,
     settingsError: null,
@@ -1351,11 +1362,19 @@ function onPauseResumeClick() {
 function onStopClick() {
   var s = App.state;
   if (s.state !== 'running') return;
-  var winnerIndex = s.winner || 1; // no pick yet: fall back to cell 1 as "current best"
-  var source = s.winner ? (s.winnerSource || 'manual') : 'manual';
-  var hints = s.winner ? (s.winnerHints || []) : [];
+  var picked = !!s.winner;
+  /* Phase 10 (no exact elite): the grid no longer guarantees any cell equals the
+     previous winner, so "no pick yet" can't fall back to cell 1 any more – it falls
+     back to currentBestGenome (the previous generation's picked winner, kept in App
+     state). At generation 1 there is no previous winner yet, so this still falls
+     back to cell 1 (matches the pre-Phase-10 behavior for that one edge case, and
+     winnerIndex 0 signals "not a real grid cell" rather than reusing a misleading 1). */
+  var winnerIndex = picked ? s.winner : 0;
+  var source = picked ? (s.winnerSource || 'manual') : 'manual';
+  var hints = picked ? (s.winnerHints || []) : [];
+  var genome = picked ? s.population[s.winner - 1] : (s.currentBestGenome || (s.population && s.population[0]));
   var entry = makeLogEntry(s.generation, winnerIndex, source, hints,
-    s.winner ? 'stopped' : 'stopped before a pick – used cell 1', s.population[winnerIndex - 1]);
+    picked ? 'stopped' : 'stopped before a pick – used the previous winner', genome);
   finishRun(winnerIndex, entry);
 }
 
@@ -1402,7 +1421,7 @@ function onStartOverClick() {
   reviewRemainingMs = null;
   App.set({
     state: 'ready', phase: null, population: null, generation: 0,
-    winner: null, winnerSource: null, winnerHints: [], runError: null, log: [], error: null,
+    winner: null, winnerSource: null, winnerHints: [], currentBestGenome: null, runError: null, log: [], error: null,
     doneGenome: null, portraitDataUrl: null, compositeDataUrl: null,
   });
   onStartClick();
@@ -1415,7 +1434,7 @@ function onNewPhotoClick() {
   reviewRemainingMs = null;
   App.set({
     state: 'idle', phase: null, population: null, generation: 0,
-    winner: null, winnerSource: null, winnerHints: [], runError: null, log: [], error: null, photo: null,
+    winner: null, winnerSource: null, winnerHints: [], currentBestGenome: null, runError: null, log: [], error: null, photo: null,
     doneGenome: null, portraitDataUrl: null, compositeDataUrl: null,
   });
 }

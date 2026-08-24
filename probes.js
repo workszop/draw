@@ -118,34 +118,64 @@
     };
   }
 
-  /* probe 4 (§7.3): elitism. A simulated 3-generation run over the pure
+  /* probe 4 (§13/Task 11): diversity. Supersedes the old elitism probe – the exact-elite
+     scheme it checked for is gone. A simulated 3-generation run over the pure
      Genome._internal.nextPopulation(winner, generation, hintedGenes, rand) – the same
-     helper app.js's real loop calls – must always put an exact copy of the winner in
-     cell 1 (hash-identical, never re-mutated). Each step's cell 1 becomes the next
-     step's winner, so a single dropped elite anywhere in the chain fails the probe.
-     Runs headless in dev.html without app.js, per the brief. */
-  function elitism() {
+     helper app.js's real loop calls, returning { population, meta } (the provenance
+     mechanism this task picked over a companion _internal field) – must each step:
+       - return a population of length 9;
+       - contain NO member whose non-wobbleSeed genes all equal the base winner's
+         (checked via gene comparison, not genomeHash, since genomeHash folds in
+         wobbleSeed and a wobbleSeed-only difference doesn't count as "differs");
+       - have exactly 6 'mutant' + 3 'random' entries in meta, aligned with population;
+       - have at least 5 of the 6 mutants differ from the winner in a non-wobbleSeed
+         gene (a looser bound than "all 6", so the probe never flakes on the
+         once-in-a-blue-moon bounded-retry edge case makeDifferentMutant's own tests
+         cover more thoroughly in Node).
+     Each step's chosen "winner" for the next step is population[0] (arbitrary – no
+     cell is privileged any more), so a single diversity violation anywhere in the
+     chain fails the probe. Runs headless in dev.html without app.js, per the brief. */
+  function diversity() {
     var Genome = window.Genome;
     var rand = Genome._internal.mulberry32(0xE1173D);
     var winner = Genome.randomGenome(rand);
+    var geneNames = Genome._internal.GENE_NAMES;
+    function differs(g, base) {
+      for (var i = 0; i < geneNames.length; i++) {
+        var name = geneNames[i];
+        if (name === 'wobbleSeed') continue;
+        if (g[name] !== base[name]) return true;
+      }
+      return false;
+    }
     var fails = [];
     for (var gen = 2; gen <= 4; gen++) {
-      var pop = Genome._internal.nextPopulation(winner, gen, new Map(), rand);
+      var built = Genome._internal.nextPopulation(winner, gen, new Map(), rand);
+      var pop = built && built.population, meta = built && built.meta;
       if (!Array.isArray(pop) || pop.length !== 9) {
         fails.push('gen ' + gen + ': population was not 9 genomes');
         break;
       }
-      var winnerHash = Genome.genomeHash(winner);
-      var cell1Hash = Genome.genomeHash(pop[0]);
-      if (cell1Hash !== winnerHash) {
-        fails.push('gen ' + gen + ': cell 1 hash ' + cell1Hash + ' != winner hash ' + winnerHash);
+      if (!Array.isArray(meta) || meta.length !== 9) {
+        fails.push('gen ' + gen + ': meta was not 9 entries');
+        break;
       }
-      winner = pop[0]; // simulate always picking the elite again, chaining the check
+      var mutantCount = 0, randomCount = 0, winnerCopies = 0, mutantDiffers = 0;
+      for (var i = 0; i < 9; i++) {
+        if (meta[i] === 'mutant') mutantCount++;
+        else if (meta[i] === 'random') randomCount++;
+        if (!differs(pop[i], winner)) winnerCopies++;
+        if (meta[i] === 'mutant' && differs(pop[i], winner)) mutantDiffers++;
+      }
+      if (winnerCopies > 0) fails.push('gen ' + gen + ': ' + winnerCopies + ' member(s) matched the winner in every non-wobbleSeed gene');
+      if (mutantCount !== 6 || randomCount !== 3) fails.push('gen ' + gen + ': meta split was ' + mutantCount + ' mutant / ' + randomCount + ' random, expected 6/3');
+      if (mutantDiffers < 5) fails.push('gen ' + gen + ': only ' + mutantDiffers + '/6 mutants differed from the winner in a non-wobbleSeed gene');
+      winner = pop[0]; // arbitrary next base – no cell is the guaranteed winner any more
     }
     return {
       pass: fails.length === 0,
       detail: fails.length === 0
-        ? 'elite genome hash preserved in cell 1 across 3 simulated generations'
+        ? '9-member population each of 3 simulated generations: no winner copies, 6/3 mutant/random split, >=5/6 mutants differ'
         : fails.join(' | '),
     };
   }
@@ -240,7 +270,7 @@
     { name: 'determinism: same genome renders identically', fn: determinism },
     { name: 'repair validity: 500 mutations all repair-idempotent', fn: repairValidity },
     { name: 'stratification: 50 initialPopulation() calls satisfy §3.5', fn: stratification },
-    { name: 'elitism: cell 1 hash equals previous winner across 3 generations', fn: elitism },
+    { name: 'diversity: 9 members, no winner copy, 6/3 split, >=5/6 mutants differ across 3 generations', fn: diversity },
     { name: 'sanitizer: 8 fixture replies parse to expected results', fn: sanitizerFixtures },
   ];
 

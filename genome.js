@@ -687,29 +687,105 @@
     return out;
   }
 
-  /* copyGenome(genome) -> a fresh object with every GENE_NAMES key copied, nothing
-     shared with the input. Used for the elite slot below, which must be byte-identical
-     to the winner (hash-verified, spec §7.3), never run back through mutate(). */
-  function copyGenome(genome) {
-    var out = {};
-    for (var i = 0; i < GENE_NAMES.length; i++) out[GENE_NAMES[i]] = genome[GENE_NAMES[i]];
-    return out;
+  // ─── Helpers: generation loop step (Phase 10: population diversity) ───
+
+  /* differsFromWinner(g, winner) -> true iff at least one NON-wobbleSeed gene differs.
+     Deliberately a gene-by-gene comparison, not a genomeHash compare: genomeHash
+     folds in wobbleSeed, and a wobbleSeed-only difference must NOT count as
+     "differs" (spec §13/Task 11) since it never changes what the portrait looks like. */
+  function differsFromWinner(g, winner) {
+    for (var i = 0; i < GENE_NAMES.length; i++) {
+      var name = GENE_NAMES[i];
+      if (name === 'wobbleSeed') continue;
+      if (g[name] !== winner[name]) return true;
+    }
+    return false;
   }
 
-  // ─── Helpers: generation loop step ───
+  var MUTANT_RETRY_ATTEMPTS = 5; // bounded re-mutate attempts before forcing a visible gene change
 
-  /* nextPopulation(winner, generation, hintedGenes, rand) (spec §3.4 loop step): cell 1
-     is an exact elite copy of the winner (same genomeHash, never re-mutated); cells 2-9
-     are mutate(winner, generation, hintedGenes, rand). Pure – no DOM, no window/document
-     – so both the app's real loop and the elitism probe (dev.html, no app.js) share this
-     one code path (spec §7.3). */
+  /* makeDifferentMutant(winner, generation, hintedGenes, rand) -> a mutate() result
+     GUARANTEED to differ from winner in >=1 non-wobbleSeed gene (spec §13/Task 11).
+     Three bounded stages, so this always terminates:
+       1. up to MUTANT_RETRY_ATTEMPTS plain mutate() calls – almost always enough.
+       2. one forced single-gene change on top of the last attempt: the mutateOneGene
+          helpers are themselves built to differ from "current" (pickOtherR/idxOtherR/
+          bool-flip/etc.), so this succeeds even when stage 1 kept rolling no-ops.
+          Prefers a hinted gene (the AI's suggested direction) so a forced change still
+          reads as a "reasonable" mutation; falls back to a random non-wobbleSeed gene.
+       3. defensive only, for the one gene (hairStyle) whose forced change can still be
+          repair()-ed back to the original value: walk every remaining non-wobbleSeed
+          gene name once, forcing each in turn, until one sticks. Bounded at
+          GENE_NAMES.length iterations, so even this worst case always terminates. */
+  function makeDifferentMutant(winner, generation, hintedGenes, rand) {
+    var m;
+    for (var attempt = 0; attempt < MUTANT_RETRY_ATTEMPTS; attempt++) {
+      m = mutate(winner, generation, hintedGenes, rand);
+      if (differsFromWinner(m, winner)) return m;
+    }
+
+    var hintedNames = [];
+    if (hintedGenes instanceof Map) {
+      hintedGenes.forEach(function (direction, name) {
+        if (name !== 'wobbleSeed') hintedNames.push(name);
+      });
+    }
+    var forceName = hintedNames.length ? pickR(rand, hintedNames)
+      : GENE_NAMES.filter(function (n) { return n !== 'wobbleSeed'; })[Math.floor(rand() * (GENE_NAMES.length - 1))];
+    var direction = (hintedGenes instanceof Map && hintedGenes.has(forceName)) ? hintedGenes.get(forceName) : null;
+    mutateOneGene(m, forceName, direction, rand);
+    m = repair(m);
+    if (differsFromWinner(m, winner)) return m;
+
+    for (var i = 0; i < GENE_NAMES.length; i++) {
+      var name = GENE_NAMES[i];
+      if (name === 'wobbleSeed') continue;
+      var candidate = {};
+      for (var k = 0; k < GENE_NAMES.length; k++) candidate[GENE_NAMES[k]] = m[GENE_NAMES[k]];
+      mutateOneGene(candidate, name, null, rand);
+      candidate = repair(candidate);
+      if (differsFromWinner(candidate, winner)) return candidate;
+    }
+    return m; // exhausted every gene; return the last attempt rather than loop forever
+  }
+
+  /* shuffleParallelR(rand, a, b) – Fisher-Yates over `a`, applying the identical swap
+     sequence to `b` so a population array and its parallel provenance-meta array stay
+     aligned. Unbiased (every permutation equally likely), rand-driven so it's
+     deterministic under a seeded rand and reproducible in Node tests. */
+  function shuffleParallelR(rand, a, b) {
+    for (var i = a.length - 1; i > 0; i--) {
+      var j = Math.floor(rand() * (i + 1));
+      var ta = a[i]; a[i] = a[j]; a[j] = ta;
+      var tb = b[i]; b[i] = b[j]; b[j] = tb;
+    }
+  }
+
+  /* nextPopulation(winner, generation, hintedGenes, rand) (spec §13/Task 11, supersedes
+     the old §3.4 exact-elite scheme): returns 9 genomes with NO exact copy of the
+     winner – 6 guaranteed-different mutants of the winner (see makeDifferentMutant
+     above) + 3 fresh randomGenome() immigrants – positions shuffled so mutants and
+     immigrants aren't distinguishable by placement. Pure – no DOM, no window/document
+     – so both the app's real loop and the diversity probe (dev.html, no app.js) share
+     this one code path.
+
+     Provenance: returns { population, meta } rather than a companion
+     Genome._internal.lastPopulationMeta – a return value keeps nextPopulation free of
+     shared mutable state (no stale meta left over from a previous call, safe to call
+     concurrently/in tests), matching the rest of this file's pure-function style. */
   function nextPopulation(winner, generation, hintedGenes, rand) {
     rand = rand || Math.random;
-    var pop = [copyGenome(winner)];
-    for (var i = 0; i < 8; i++) {
-      pop.push(mutate(winner, generation, hintedGenes, rand));
+    var population = [], meta = [];
+    for (var i = 0; i < 6; i++) {
+      population.push(makeDifferentMutant(winner, generation, hintedGenes, rand));
+      meta.push('mutant');
     }
-    return pop;
+    for (i = 0; i < 3; i++) {
+      population.push(randomGenome(rand));
+      meta.push('random');
+    }
+    shuffleParallelR(rand, population, meta);
+    return { population: population, meta: meta };
   }
 
   // ─── Render: the marker box, resolved lazily so genome.js loads without a DOM ───
