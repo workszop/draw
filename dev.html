@@ -6,11 +6,130 @@
   <title>Likeness Evolver – Dev Harness</title>
   <link rel="stylesheet" href="style.css">
 </head>
-<body class="edu">
-  <main id="probes"></main>
-  <canvas id="sheet"></canvas>
+<body class="dev">
+  <header class="dev-head">
+    <h1>Likeness Evolver – dev harness</h1>
+    <p class="dev-note">Probes, a 3×3 sheet of random repaired genomes, and the trait-fidelity genomes.
+      Add <code>?seed=123</code> to reproduce a sheet.</p>
+  </header>
+
+  <section>
+    <h2>Probes</h2>
+    <main id="probes" class="probe-list"></main>
+  </section>
+
+  <section>
+    <h2>Random genomes</h2>
+    <div id="sheet" class="face-grid"></div>
+  </section>
+
+  <section>
+    <h2>Trait fidelity</h2>
+    <div id="fidelity" class="face-grid face-grid-3"></div>
+  </section>
+
   <script src="pen.js"></script>
   <script src="genome.js"></script>
   <script src="probes.js"></script>
+  <script>
+  (function () {
+    'use strict';
+
+    // ─── Constants ───
+    var CELL_W = 240, CELL_H = 300;
+
+    /* hand-built genomes for the trait-fidelity spot check (spec Phase 1) */
+    var FIDELITY = [
+      ['old masc bald, full grey beard, round glasses', {
+        age: 'old', gender: 'masc', expr: 'neutral',
+        hairStyle: 'bald', hairDark: false, hairFillIdx: 3, hairTintIdx: null,
+        skinIdx: 2, washMode: 'flat', hatWashIdx: null, accentIdx: 1, inkIdx: 0,
+        penW: 1.15, headW: 68, headRatio: 1.14, tilt: -0.03, look: 0,
+        eyeKind: 'ring', browKind: 'thick', noseKind: 'big', mouthKind: 'flat',
+        stache: 'none', beard: 'full', eyewear: 'round', bow: false, earrings: 'none',
+        wobbleSeed: 101,
+      }],
+      ['child fem pigtails, big eyes', {
+        age: 'child', gender: 'fem', expr: 'neutral',
+        hairStyle: 'pigtails', hairDark: true, hairFillIdx: 0, hairTintIdx: null,
+        skinIdx: 0, washMode: 'flat', hatWashIdx: null, accentIdx: 0, inkIdx: 0,
+        penW: 1.0, headW: 54, headRatio: 1.02, tilt: 0.05, look: -0.5,
+        eyeKind: 'big', browKind: 'arc', noseKind: 'button', mouthKind: 'grin',
+        stache: 'none', beard: 'none', eyewear: 'none', bow: true, earrings: 'none',
+        wobbleSeed: 202,
+      }],
+      ['adult fem dark long hair, cateye glasses', {
+        age: 'adult', gender: 'fem', expr: 'neutral',
+        hairStyle: 'long', hairDark: true, hairFillIdx: 0, hairTintIdx: null,
+        skinIdx: 4, washMode: 'flat', hatWashIdx: null, accentIdx: 0, inkIdx: 0,
+        penW: 1.05, headW: 64, headRatio: 1.2, tilt: 0.02, look: 0.5,
+        eyeKind: 'ring', browKind: 'arc', noseKind: 'straight', mouthKind: 'lips',
+        stache: 'none', beard: 'none', eyewear: 'cateye', bow: false, earrings: 'drop',
+        wobbleSeed: 303,
+      }],
+    ];
+
+    // ─── DOM refs ───
+    var probesEl = document.getElementById('probes');
+    var sheetEl = document.getElementById('sheet');
+    var fidelityEl = document.getElementById('fidelity');
+
+    // ─── Helpers ───
+    function cell(parent, label) {
+      var fig = document.createElement('figure');
+      fig.className = 'face-cell';
+      var canvas = document.createElement('canvas');
+      canvas.width = CELL_W; canvas.height = CELL_H;
+      var cap = document.createElement('figcaption');
+      cap.textContent = label;
+      fig.appendChild(canvas); fig.appendChild(cap);
+      parent.appendChild(fig);
+      return canvas;
+    }
+
+    function seedFromQuery() {
+      var m = /[?&]seed=(-?\d+)/.exec(window.location.search);
+      return m ? parseInt(m[1], 10) : (Date.now() | 0);
+    }
+
+    // ─── Render ───
+    function renderProbes() {
+      var results = window.Probes.run();
+      probesEl.textContent = '';
+      results.forEach(function (r) {
+        var row = document.createElement('p');
+        row.className = 'probe-row';
+        row.setAttribute('data-pass', r.pass ? 'true' : 'false');
+        row.textContent = (r.pass ? 'PASS' : 'FAIL') + ' – ' + r.name + ' – ' + r.detail;
+        probesEl.appendChild(row);
+      });
+      probesEl.setAttribute('data-all-pass', results.every(function (r) { return r.pass; }) ? 'true' : 'false');
+    }
+
+    function renderSheet(seed) {
+      var rand = window.Genome.mulberry32(seed);
+      sheetEl.textContent = '';
+      for (var i = 0; i < 9; i++) {
+        var g = window.Genome.randomGenome(rand);
+        var label = (i + 1) + ' · ' + g.age + ' ' + g.gender + ' · ' + g.hairStyle + ' · ' + window.Genome.genomeHash(g);
+        window.Genome.renderGenome(cell(sheetEl, label), g);
+      }
+      sheetEl.setAttribute('data-seed', String(seed));
+    }
+
+    function renderFidelity() {
+      fidelityEl.textContent = '';
+      FIDELITY.forEach(function (pair) {
+        var g = window.Genome.repair(pair[1]);
+        window.Genome.renderGenome(cell(fidelityEl, pair[0]), g);
+      });
+    }
+
+    // ─── Init ───
+    renderProbes();
+    renderSheet(seedFromQuery());
+    renderFidelity();
+  })();
+  </script>
 </body>
 </html>
