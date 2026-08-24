@@ -41,8 +41,12 @@
      headRatio, which is deliberately left independent of this gene. */
   var FACE_SHAPES = ['oval', 'round', 'long', 'heart', 'square'];
   var EAR_STYLES = ['flat', 'out'];
-  /* jaw width multiplier per face shape, applied to the head blob below the eye line */
-  var JAW_K = { oval: 0.95, round: 1.0, long: 1.0, heart: 0.80, square: 1.08 };
+  /* jaw width multiplier per face shape, applied to the head blob below the eye line.
+     Widened from the plan's 0.80/0.95/1.0/1.08 spread: with the linear ramp in
+     shapeJaw() the plan's oval (0.95) and round (1.0) came out ≤2.5% apart at the chin,
+     which is invisible. Widening the spread (rather than steepening the ramp) keeps the
+     silhouette's smooth taper while making each shape name readable on the page. */
+  var JAW_K = { oval: 0.92, round: 1.0, long: 1.0, heart: 0.78, square: 1.10 };
   /* ranges for the Phase 9 float genes, one place so GENES/repair/mutate agree */
   var EAR_SIZE_RANGE = [0.8, 1.35];
   var NOSE_SIZE_RANGE = [0.7, 1.4];
@@ -468,6 +472,17 @@
         if (direction === 'longer') g.headRatio = g.headRatio * 1.08;
         else if (direction === 'rounder') g.headRatio = g.headRatio * 0.92;
         else { var rr = desc.range(g.age); g.headRatio = rfR(rand, rr[0], rr[1]); }
+        return;
+      }
+      case 'faceShape': {
+        /* face_shape hints carry rounder/longer/wider/narrower (headW and headRatio
+           honour them), so faceShape has to move WITH the hint rather than re-pick at
+           random – a "rounder face" hint must never land on heart or square. */
+        if (direction === 'rounder') g.faceShape = 'round';
+        else if (direction === 'longer') g.faceShape = 'long';
+        else if (direction === 'wider') g.faceShape = 'square';
+        else if (direction === 'narrower') g.faceShape = 'heart';
+        else g.faceShape = pickOtherR(rand, FACE_SHAPES, g.faceShape);
         return;
       }
       case 'earSize': case 'noseSize': case 'mouthSize': case 'eyeSize': {
@@ -1273,16 +1288,24 @@
     if (isOld && eyeKind === 'big') eyeKind = 'ring';
     var lashes = chance(0.85 * soft);
     var eyeSize = F.eyeSize;                     // gene: scales every eye radius below
+    var gap = F.gap;                             // half the distance between the eye centres
+    /* the biggest radius actually drawn, published on F for faceEyewear's lens floor.
+       faceEyes always runs before faceEyewear, so the value is there when it is read. */
+    F.eyeR = 0;
+    function noteR(r) { if (r > F.eyeR) F.eyeR = r; return r; }
 
     function eye(x, kind, s, side) {
-      if (kind === 'dot') { dot(x, eyeY, rf(2, 3.2) * (isChild ? 1.3 : 1) * eyeSize); return; }
-      if (kind === 'wink') { arc(x, eyeY, rf(5, 8) * eyeSize, 0.15, Math.PI - 0.15, { width: 2 }); return; }
+      if (kind === 'dot') { dot(x, eyeY, noteR(rf(2, 3.2) * (isChild ? 1.3 : 1) * eyeSize)); return; }
+      if (kind === 'wink') { arc(x, eyeY, noteR(rf(5, 8) * eyeSize), 0.15, Math.PI - 0.15, { width: 2 }); return; }
       var r;
       if (kind === 'closed') {
-        r = rf(5, 8) * eyeSize;
+        r = noteR(rf(5, 8) * eyeSize);
         arc(x, eyeY, r, Math.PI + 0.15, Math.PI * 2 - 0.15, { width: 2 });
       } else {
-        r = (kind === 'big' ? rf(10, 16) : rf(5.5, 9)) * s * (isOld ? 0.85 : 1) * eyeSize;
+        /* clamped just under the half-gap: at eyeSize 1.3 with eyeGap 0.85 a 'big' eye
+           could otherwise reach past cx and the two eyes would overlap on the midline.
+           The clamp is applied AFTER the roll, so the RNG stream is untouched. */
+        r = noteR(Math.min((kind === 'big' ? rf(10, 16) : rf(5.5, 9)) * s * (isOld ? 0.85 : 1) * eyeSize, gap * 0.9));
         arc(x, eyeY, r, 0, Math.PI * 2, { width: 1.8, wob: 0.9 });
         var px = x + look * r * 0.35 + rf(-1, 1), py = eyeY + rf(-1, 2);
         dot(px, py, Math.max(1.6, r * (isChild ? rf(0.35, 0.5) : rf(0.22, 0.4))));
@@ -1418,8 +1441,9 @@
           hatch(cx - rx, top, cx + rx, cy + ry * 1.05, ri(60, 110), Math.PI / 2 + rf(-0.3, 0.3), 10);
         } else {
           sketch([[cx - rx * 1.2, top], [cx + rx * 1.2, top], [cx + rx * 1.2, cy + ry * 1.5], [cx - rx * 1.2, cy + ry * 1.5]], { closed: true, fill: true, wob: 2, width: 2 });
-          /* redraw the mouth on top of the beard in paper colour */
-          line(mx - 8, mY + 2, mx + 8, mY + 2, { width: 2.4, wob: 0.6, color: pen.base });
+          /* redraw the mouth on top of the beard in paper colour – scaled by mS, or the
+             mouthSize gene would be invisible on every full dark beard */
+          line(mx - 8 * mS, mY + 2, mx + 8 * mS, mY + 2, { width: 2.4, wob: 0.6, color: pen.base });
         }
       });
     }
@@ -1473,7 +1497,10 @@
   function faceEyewear(F) {
     var cx = F.cx, exL = F.exL, exR = F.exR, eyeY = F.eyeY, gap = F.gap, rx = F.rx, shift = F.shift;
     var specs = F.eyewear;                       // gene
-    var lensR = gap * rf(0.5, 0.65);
+    /* the lens is a fraction of the eye gap, but never smaller than the eye behind it –
+       eyeSize can now push the eye well past a gap-only lens (F.eyeR is the biggest
+       radius faceEyes actually drew, published there for exactly this) */
+    var lensR = Math.max(gap * rf(0.5, 0.65), (F.eyeR || 0) * 1.15);
     var temple = function (x, y, s) { line(x, y, cx + s * rx * 0.98 + shift * 0.3, y - 3, { width: 1.6 }); };
     if (specs === 'round' || specs === 'pince') {
       arc(exL, eyeY, lensR, 0, Math.PI * 2, { width: 2, wob: 1 });
@@ -1638,6 +1665,8 @@
     _internal: {
       GENE_NAMES: GENE_NAMES,
       DIRECTION_WORDS: DIRECTION_WORDS,
+      JAW_K: JAW_K,
+      shapeJaw: shapeJaw,          // exposed so the jaw ramp can be measured without a canvas
       HAIR_VALID: HAIR_VALID,
       HAT_STYLES: HAT_STYLES,
       NO_BOW_STYLES: NO_BOW_STYLES,
