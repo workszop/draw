@@ -269,16 +269,45 @@ function buildGridJpeg(population) {
 
 // ─── Helpers: settings persistence (spec §4.4) ───
 
+/* defaultModelFor(provider) -> that provider's catalog defaultModel if set, else its
+   curated list's first entry. Used everywhere a default model is chosen: a fresh
+   visitor's initial settings, the stored-settings migration target, and provider
+   switch (see onProviderChange's initialization of a provider's model on first
+   visit to it, via loadSettings' models map). */
+function defaultModelFor(provider) {
+  var info = window.AI_MODEL_CATALOG.providers[provider];
+  return info.defaultModel ?? info.models[0];
+}
+
+/* RETIRED_MODELS (Task 12) – pre-catalog stored model values that predate the current
+   curated lists. A stored per-provider model exactly matching its provider's entry
+   here is a migration candidate (see loadSettings below), not a genuine custom model;
+   any other non-curated stored value is left alone as a real custom entry. */
+var RETIRED_MODELS = {
+  gemini: 'gemini-2.5-flash',
+  openai: 'gpt-4o',
+  claude: 'claude-opus-4-8',
+};
+
 /* loadSettings() -> { provider, models, keys }, read from localStorage['draw.settings']
    (provider + models) and localStorage['draw.keys'] (JSON object of key strings per
    provider). Tolerant of missing/corrupt storage or a disabled localStorage – always
    returns a complete, valid object built from MODELS defaults. Never throws, never logs
-   the key values it finds. */
+   the key values it finds.
+
+   Task 12: also migrates a stored per-provider model that equals that provider's
+   RETIRED_MODELS entry (a pre-catalog default that no longer exists in the curated
+   list) to defaultModelFor(provider), and persists the migrated value back to
+   localStorage so the migration only has to run once. Runs once per load, is
+   idempotent (a second load of the same already-migrated value is not a RETIRED_MODELS
+   match any more, so it's a no-op), and never touches the 'draw.keys' entry. Any other
+   non-curated stored value is a genuine custom model and is left untouched. */
 function loadSettings() {
   var provider = window.AI_MODEL_CATALOG.defaultProvider;
   var models = {};
-  PROVIDERS.forEach(function (p) { models[p] = window.AI_MODEL_CATALOG.providers[p].models[0]; });
+  PROVIDERS.forEach(function (p) { models[p] = defaultModelFor(p); });
   var keys = { gemini: '', openai: '', claude: '' };
+  var migrated = false;
   try {
     var rawSettings = window.localStorage.getItem('draw.settings');
     if (rawSettings) {
@@ -293,6 +322,15 @@ function loadSettings() {
           });
         }
       }
+    }
+    PROVIDERS.forEach(function (p) {
+      if (models[p] === RETIRED_MODELS[p]) {
+        models[p] = defaultModelFor(p);
+        migrated = true;
+      }
+    });
+    if (migrated) {
+      window.localStorage.setItem('draw.settings', JSON.stringify({ provider: provider, models: models }));
     }
     var rawKeys = window.localStorage.getItem('draw.keys');
     if (rawKeys) {

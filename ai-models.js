@@ -10,7 +10,7 @@
   'use strict';
 
   var AI_MODEL_CATALOG = {
-    defaultProvider: 'gemini',
+    defaultProvider: 'openai',
     providers: {
       gemini: {
         label: 'Gemini',
@@ -26,7 +26,10 @@
       },
       openai: {
         label: 'OpenAI',
+        // Most-capable-first order (sol, terra, luna); the default model is
+        // GPT Luna via defaultModel below, not by reordering this list.
         models: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
+        defaultModel: 'gpt-5.6-luna',
         keyPlaceholder: 'sk-…',
         keyUrl: 'https://platform.openai.com/api-keys',
         // Model discovery: GET {listUrl} with a Bearer token returns {data:[{id}]}.
@@ -36,7 +39,7 @@
       },
       claude: {
         label: 'Claude',
-        models: ['claude-opus-4-8', 'claude-sonnet-5', 'claude-haiku-4-5'],
+        models: ['claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5'],
         keyPlaceholder: 'sk-ant-…',
         keyUrl: 'https://console.anthropic.com/settings/keys',
         // Model discovery: GET {listUrl} with x-api-key + version returns {data:[{id}]}.
