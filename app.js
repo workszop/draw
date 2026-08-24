@@ -32,6 +32,16 @@ var PROVIDERS = Object.keys(window.AI_MODEL_CATALOG.providers);
 var PROVIDER_LABELS = {};
 PROVIDERS.forEach(function (p) { PROVIDER_LABELS[p] = window.AI_MODEL_CATALOG.providers[p].label; });
 var JUDGE_RETRY_MS = 1500;               // judge failure path (spec §6): retry once after this delay
+
+/* providerMap(valueFactory) -> { [providerId]: valueFactory() } for every provider in
+   the catalog. Used to build per-provider bookkeeping objects (discovered models,
+   discovery latch) without hardcoding the provider names a second time – they
+   already live in PROVIDERS, itself derived from AI_MODEL_CATALOG. */
+function providerMap(valueFactory) {
+  var m = {};
+  PROVIDERS.forEach(function (p) { m[p] = valueFactory(); });
+  return m;
+}
 var MAX_HINTS_REQUESTED = 4;             // prompt-side cap; the sanitizer itself does not truncate the list
 
 // ─── Constants: log thumbnails (Task 9) ───
@@ -63,7 +73,12 @@ var App = {
     provider: initialSettings.provider,   // 'gemini' | 'openai' | 'claude'
     models: initialSettings.models,       // { gemini, openai, claude } model name text
     keys: initialSettings.keys,           // { gemini, openai, claude } API key text – never logged
-    discovered: { gemini: [], openai: [], claude: [] }, // Task 9: extra model IDs discovered per provider (non-curated only), runtime-only
+    discovered: providerMap(function () { return []; }), // Task 9: extra model IDs discovered per provider (non-curated only), runtime-only
+    settingsModelCustomMode: false,       // Task 9 (review fix): true once the user has picked "Custom…" in the
+                                           // model select, until a concrete model is chosen or the provider changes –
+                                           // kept in state (not derived from s.models) so an unrelated re-render
+                                           // (e.g. discovery resolving) can never silently snap the select back to
+                                           // a curated value and hide the custom row out from under the user
     settingsHighlight: false,             // true right after a blocked Start (missing key)
     settingsError: null,                  // message shown in the settings panel
     runError: null,                       // judge-failure message shown while phase === 'paused'
@@ -119,13 +134,20 @@ var judgeEpoch = 0;
 
 /* lastDiscoveryKey – per-provider bookkeeping for model discovery (Task 9), same
    "runtime-only, not App.state" reasoning as judgeEpoch above: a plain closure var
-   so a settings-panel re-render never re-fires discovery for a key it has already
-   fired for. Maps provider -> the exact key string discovery was last kicked off
-   with (or null). When discoverProviderModels resolves, the result is only applied
-   if App.state.provider and App.state.keys[provider] still match what the fetch
-   was fired for – the same stale-guard shape as judgeEpoch, just keyed on
+   so a repeated trigger (provider-change, key-change, init) never re-fires discovery
+   for a key it has already fired for while that fetch is in flight or has already
+   landed something no better than curated. Maps provider -> the exact key string
+   discovery was last kicked off with (or null). The latch is cleared back to null
+   (not left set) whenever the in-flight fetch's result turns out stale (provider/key
+   moved on before it resolved) or doesn't improve on the curated list (a network
+   failure included, since discoverProviderModels never rejects – see its own
+   comment) – review fix: leaving it set in either case would permanently disable
+   discovery for that provider until the key string itself changed, even after a
+   transient failure. When discoverProviderModels resolves, the result is only
+   applied if App.state.provider and App.state.keys[provider] still match what the
+   fetch was fired for – the same stale-guard shape as judgeEpoch, just keyed on
    (provider, key) instead of an incrementing counter. */
-var lastDiscoveryKey = { gemini: null, openai: null, claude: null };
+var lastDiscoveryKey = providerMap(function () { return null; });
 
 // ─── DOM refs ───
 
@@ -369,33 +391,49 @@ function discoverProviderModels(providerId, key, options) {
   }).catch(function () {
     return curated.slice();
   }).then(function (result) {
+    // this .then only ever sees a fulfillment: every failure branch above already
+    // recovers into a resolved curated.slice(), so there is no rejection left to
+    // handle here (an onRejected callback here would be unreachable dead code).
     window.clearTimeout(timeoutId);
     return result;
-  }, function () {
-    window.clearTimeout(timeoutId);
-    return curated.slice();
   });
 }
 
-/* maybeDiscoverModels(s) – called every time the settings panel renders. Fires
-   discoverProviderModels at most once per distinct (provider, key) pair (tracked in
-   lastDiscoveryKey, a plain closure var – see its declaration above) so a saved key
-   triggers discovery on the settings panel's first render, and a key change (which
-   changes what's in App.state.keys[provider]) triggers it again, without refiring on
-   every unrelated re-render. On resolution, the result is applied only if the
-   provider and key are still what the fetch was fired for (App.state may have moved
-   on – provider switched, key edited again – while the request was in flight). */
-function maybeDiscoverModels(s) {
-  var provider = s.provider;
-  var key = s.keys[provider];
+/* maybeDiscoverModels(provider) – kicks off discoverProviderModels for `provider`'s
+   currently saved key. Called only from listeners (onProviderChange, onKeyChange)
+   and once at init – deliberately NOT from render() (review fix: firing network
+   traffic as a side effect of renderSettingsPanel broke render purity), so the only
+   things that can trigger a fetch are the user actually changing something and the
+   app's own startup.
+
+   Fires at most once per distinct (provider, key) pair while that pair's attempt
+   hasn't yet been established as unproductive (tracked in lastDiscoveryKey, a plain
+   closure var – see its declaration above). On resolution the result is applied,
+   and the latch cleared for a future retry, in three cases: the provider/key moved
+   on before the fetch settled (stale), or the fetch landed nothing better than the
+   curated list (covers both an actual failure – discoverProviderModels never
+   rejects – and a provider that simply has no live extras right now). Only a
+   genuine improvement over curated keeps the latch set, so the same (provider, key)
+   pair is never re-fetched pointlessly, while every other outcome leaves the door
+   open for the next trigger (another key edit, a provider round-trip, reopening the
+   app) to try again. */
+function maybeDiscoverModels(provider) {
+  var key = App.state.keys[provider];
   if (!key || !key.trim()) return;
   if (lastDiscoveryKey[provider] === key) return; // already discovered (or discovering) for this exact key
   lastDiscoveryKey[provider] = key;
   var curated = window.AI_MODEL_CATALOG.providers[provider].models;
   discoverProviderModels(provider, key).then(function (list) {
-    if (App.state.provider !== provider || App.state.keys[provider] !== key) return; // stale – provider/key moved on
+    if (App.state.provider !== provider || App.state.keys[provider] !== key) {
+      lastDiscoveryKey[provider] = null; // stale – provider/key moved on; let a later trigger retry
+      return;
+    }
     var extra = list.filter(function (m) { return curated.indexOf(m) < 0; });
-    var discovered = {};
+    if (!extra.length) {
+      lastDiscoveryKey[provider] = null; // no improvement over curated (failure or genuinely nothing new) – allow a retry
+      return;
+    }
+    var discovered = providerMap(function () { return []; });
     for (var k in App.state.discovered) {
       if (Object.prototype.hasOwnProperty.call(App.state.discovered, k)) discovered[k] = App.state.discovered[k];
     }
@@ -785,7 +823,10 @@ function render() {
 
   if (headerControlsEl) {
     clearEl(headerControlsEl);
-    headerControlsEl.appendChild(renderHeaderControls(s));
+    // review fix: no run controls on the done screen (matches the pre-Task-9
+    // behavior, where the old center-column controls-bar simply wasn't rendered
+    // there) rather than showing three permanently-disabled buttons.
+    if (s.state !== 'done') headerControlsEl.appendChild(renderHeaderControls(s));
   }
 
   if (liveEl) liveEl.textContent = computeLiveAnnouncement(s);
@@ -996,6 +1037,14 @@ function renderSettingsPanel(s) {
   var combinedModels = curatedModels.concat(discoveredExtra.filter(function (m) { return curatedModels.indexOf(m) < 0; }));
   var currentModel = s.models[s.provider];
   var isCurrentKnown = combinedModels.indexOf(currentModel) >= 0;
+  /* showCustom (review fix): a stored non-curated model always shows as custom
+     (isCurrentKnown false), OR the user has explicitly picked "Custom…" this
+     session (s.settingsModelCustomMode, held in App.state) – reading the flag from
+     state rather than re-deriving it purely from currentModel means an unrelated
+     re-render (discovery resolving, a key edit on this same render pass, etc.) can
+     never silently snap the select back to a curated value and hide the row the
+     user is actively using. */
+  var showCustom = s.settingsModelCustomMode || !isCurrentKnown;
 
   var modelRow = el('div', { class: 'settings-row' });
   modelRow.appendChild(el('label', { for: 'settings-model', text: 'Model' }));
@@ -1006,12 +1055,12 @@ function renderSettingsPanel(s) {
     modelSelect.appendChild(opt);
   });
   modelSelect.appendChild(el('option', { value: CUSTOM_VALUE, text: 'Custom…' }));
-  modelSelect.value = isCurrentKnown ? currentModel : CUSTOM_VALUE;
+  modelSelect.value = showCustom ? CUSTOM_VALUE : currentModel;
   modelRow.appendChild(modelSelect);
   panel.appendChild(modelRow);
 
   var customModelRow = el('div', { class: 'settings-row settings-row-custom-model' });
-  if (isCurrentKnown) customModelRow.style.display = 'none';
+  if (!showCustom) customModelRow.style.display = 'none';
   customModelRow.appendChild(el('label', { for: 'settings-model-custom', text: 'Custom model ID' }));
   var customModelInput = el('input', { id: 'settings-model-custom', type: 'text', autocomplete: 'off' });
   customModelInput.value = isCurrentKnown ? '' : currentModel;
@@ -1020,10 +1069,9 @@ function renderSettingsPanel(s) {
 
   modelSelect.addEventListener('change', function () {
     if (modelSelect.value === CUSTOM_VALUE) {
-      customModelRow.style.display = '';
-      customModelInput.focus();
+      App.set({ settingsModelCustomMode: true });
     } else {
-      customModelRow.style.display = 'none';
+      App.set({ settingsModelCustomMode: false });
       onModelChange(modelSelect.value);
     }
   });
@@ -1053,7 +1101,9 @@ function renderSettingsPanel(s) {
     text: 'Keys stay in this browser (saved to localStorage) and are sent only to the selected provider.',
   }));
 
-  maybeDiscoverModels(s); // Task 9: best-effort, fires at most once per (provider, key) pair
+  // model discovery (Task 9) is triggered from the provider-change/key-change
+  // listeners and once at init – never from render() – so it stays a listener/init
+  // side effect, not a render-path one (review fix, see maybeDiscoverModels' comment)
 
   if (s.settingsError) {
     panel.appendChild(el('p', { class: 'settings-error', text: s.settingsError }));
@@ -1374,8 +1424,9 @@ function onNewPhotoClick() {
 
 function onProviderChange(provider) {
   if (PROVIDERS.indexOf(provider) < 0) return;
-  App.set({ provider: provider, settingsHighlight: false, settingsError: null });
+  App.set({ provider: provider, settingsHighlight: false, settingsError: null, settingsModelCustomMode: false });
   saveSettings();
+  maybeDiscoverModels(provider); // Task 9 (review fix): triggered from this listener, not from render()
 }
 
 function onModelChange(value) {
@@ -1389,16 +1440,24 @@ function onModelChange(value) {
 
 function onKeyChange(value) {
   var s = App.state;
+  var provider = s.provider;
   var keys = {};
   for (var k in s.keys) if (Object.prototype.hasOwnProperty.call(s.keys, k)) keys[k] = s.keys[k];
-  keys[s.provider] = value;
+  keys[provider] = value;
   App.set({ keys: keys, settingsHighlight: false, settingsError: null });
   saveKeys(); // never logged – written straight to localStorage
+  maybeDiscoverModels(provider); // Task 9 (review fix): triggered from this listener, not from render()
 }
 
 // ─── Init ───
 
 (function init() {
+  // Task 9 (review fix): model discovery for the initial provider's saved key (if
+  // any – e.g. restored from a previous session's localStorage), fired once here
+  // rather than from render() so a fresh load behaves the same as any other
+  // discovery trigger: a listener/init side effect, not a render-path one.
+  maybeDiscoverModels(App.state.provider);
+
   // global paste intake: works anywhere on the page, not only when the
   // dropzone has focus (§5 idle: file input + drag-drop + paste)
   window.addEventListener('paste', function (ev) {
