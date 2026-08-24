@@ -113,6 +113,7 @@ var judgeEpoch = 0;
 
 var appEl = document.getElementById('app');
 var probesEl = document.getElementById('probes');
+var liveEl = document.getElementById('live-announcer'); // sr-only aria-live region, outside #app so re-render never touches it
 
 // ─── Helpers ───
 
@@ -613,6 +614,22 @@ function advanceGeneration() {
 
 // ─── Render ───
 
+/* computeLiveAnnouncement(s) (Task 7): the exact sentence the sr-only #live-announcer
+   region should read out right now. A winner (AI or manual) is the generation's
+   "result"; the done screen gets its own one-line wrap-up. Empty string means "leave
+   the region as it was" is not attempted here – render() always overwrites it, so an
+   empty string here means nothing new to announce (drawing/judging phases). */
+function computeLiveAnnouncement(s) {
+  if (s.state === 'done') {
+    return 'Run finished after generation ' + s.generation + '. Final portrait ready.';
+  }
+  if (s.state === 'running' && s.winner) {
+    var who = s.winnerSource === 'ai' ? 'AI' : 'you';
+    return 'Generation ' + s.generation + ': face ' + s.winner + ' selected by ' + who + '.';
+  }
+  return '';
+}
+
 function render() {
   var s = App.state;
   appEl.setAttribute('data-state', s.state);
@@ -623,6 +640,70 @@ function render() {
   appEl.appendChild(renderLeftColumn(s));
   appEl.appendChild(renderCenterColumn(s));
   appEl.appendChild(renderRightColumn(s));
+
+  if (liveEl) liveEl.textContent = computeLiveAnnouncement(s);
+}
+
+/* renderProgressBar(s) (Task 7) -> "generation g / 10" bar, visible only while a run
+   is actually under way (state 'running'). role="progressbar" + aria-value* so the
+   number is exposed to assistive tech as well as read visually. */
+function renderProgressBar(s) {
+  if (s.state !== 'running') return null;
+  var gen = s.generation || 0;
+  var wrap = el('div', {
+    class: 'progress-bar',
+    role: 'progressbar',
+    'aria-valuemin': '0',
+    'aria-valuemax': String(MAX_GENERATIONS),
+    'aria-valuenow': String(gen),
+    'aria-label': 'Generation ' + gen + ' of ' + MAX_GENERATIONS,
+  });
+  var track = el('div', { class: 'progress-bar-fill-track' });
+  var fill = el('div', { class: 'progress-bar-fill' });
+  fill.style.width = (Math.min(1, gen / MAX_GENERATIONS) * 100) + '%';
+  track.appendChild(fill);
+  wrap.appendChild(track);
+  var label = el('span', { class: 'progress-bar-label', 'aria-hidden': 'true', text: 'Gen ' + gen + ' / ' + MAX_GENERATIONS });
+  wrap.appendChild(label);
+  return wrap;
+}
+
+/* renderReviewBar(s) (Task 7, deferred item a) -> a thin bar draining over the
+   REVIEW_MS auto-advance window while phase === 'reviewing', frozen (no animation)
+   at its current position while phase === 'paused'. Reads reviewDeadline /
+   reviewRemainingMs directly – they're plain closure vars in this same file, kept
+   outside App.state on purpose (see the comment above their declaration), and render()
+   already re-runs on every timer-relevant App.set() (pick, pause, resume). The
+   width-then-rAF-then-zero dance is the standard CSS-transition trick: setting the
+   starting width and the finishing width in the same tick would just jump, so the
+   finishing width is deferred one frame to force the browser to animate between them.
+   prefers-reduced-motion is handled globally in style.css (transition-duration
+   collapsed to ~0), not here. */
+function renderReviewBar(s) {
+  if (s.state !== 'running' || !s.winner || (s.phase !== 'reviewing' && s.phase !== 'paused')) return null;
+  var wrap = el('div', { class: 'review-bar', 'aria-hidden': 'true' });
+  var fill = el('div', { class: 'review-bar-fill' });
+
+  if (s.phase === 'reviewing' && reviewDeadline !== null) {
+    var remaining = Math.max(0, reviewDeadline - Date.now());
+    var pct = Math.min(100, (remaining / REVIEW_MS) * 100);
+    fill.style.transitionDuration = '0ms';
+    fill.style.width = pct + '%';
+    window.requestAnimationFrame(function () {
+      fill.style.transitionDuration = remaining + 'ms';
+      fill.style.width = '0%';
+    });
+  } else {
+    // paused: frozen at whatever was left when Pause froze the timer (or full, if
+    // paused before a timer ever started – e.g. straight into a judge-failure pause)
+    var frozenMs = reviewRemainingMs !== null ? reviewRemainingMs : REVIEW_MS;
+    var pctPaused = Math.min(100, (frozenMs / REVIEW_MS) * 100);
+    fill.style.transitionDuration = '0ms';
+    fill.style.width = pctPaused + '%';
+  }
+
+  wrap.appendChild(fill);
+  return wrap;
 }
 
 function renderLeftColumn(s) {
@@ -751,10 +832,12 @@ function renderCenterColumn(s) {
   stopBtn.disabled = s.state !== 'running';
   stopBtn.addEventListener('click', onStopClick);
 
-  var progress = el('span', {
-    class: 'progress-placeholder',
-    text: 'Generation ' + (s.generation || 0) + ' / ' + MAX_GENERATIONS,
-  });
+  bar.appendChild(startBtn);
+  bar.appendChild(pauseBtn);
+  bar.appendChild(stopBtn);
+
+  var progress = renderProgressBar(s);
+  if (progress) bar.appendChild(progress);
 
   var status = el('span', { class: 'review-status' });
   if (s.state === 'running') {
@@ -771,16 +854,22 @@ function renderCenterColumn(s) {
     }
   }
 
-  bar.appendChild(startBtn);
-  bar.appendChild(pauseBtn);
-  bar.appendChild(stopBtn);
-  bar.appendChild(progress);
   bar.appendChild(status);
   col.appendChild(bar);
 
+  // ── review countdown bar (Task 7, deferred item a): thin bar draining over the
+  // REVIEW_MS auto-advance window; frozen (not animating) while paused. Reads the
+  // review-timer closure vars directly, since it's defined in the same scope. ──
+  var reviewBar = renderReviewBar(s);
+  if (reviewBar) col.appendChild(reviewBar);
+
   // ── grid ──
   var gridPanel = el('div', { class: 'panel' });
-  var grid = el('div', { id: 'grid' });
+  var grid = el('div', {
+    id: 'grid',
+    role: 'group',
+    'aria-label': 'Candidate portraits, generation ' + (s.generation || 0),
+  });
   grid.setAttribute('data-generation', String(s.generation || 0));
   grid.setAttribute('data-winner', s.winner ? String(s.winner) : '');
   grid.setAttribute('data-winner-source', s.winnerSource || '');
@@ -802,13 +891,16 @@ function renderCell(s, i) {
   var index = i + 1;
   var genome = s.population[i];
   var hash = window.Genome.genomeHash(genome);
+  var isWinner = s.winner === index;
+  var label = 'Candidate ' + index +
+    (isWinner ? ', selected' + (s.winnerSource === 'ai' ? ' by AI' : ' by you') : '');
   var cell = el('div', {
-    class: 'cell' + (s.winner === index ? ' is-winner' : ''),
+    class: 'cell' + (isWinner ? ' is-winner' : ''),
     'data-index': String(index),
     'data-genome-hash': hash,
     tabindex: '0',
     role: 'button',
-    'aria-label': 'Candidate ' + index,
+    'aria-label': label,
   });
   var canvas = document.createElement('canvas');
   canvas.width = CELL_W; canvas.height = CELL_H;
@@ -918,7 +1010,14 @@ function handlePhotoFile(file) {
   readPhotoFile(file).then(function (photo) {
     App.set({ state: 'ready', error: null, photo: photo });
   }).catch(function (err) {
-    App.set({ error: err.message, state: 'idle', photo: null });
+    // a failed re-upload must not clobber an already-valid photo/state (Task 7): only
+    // fall back to idle/no-photo when there was no valid photo to keep in the first place
+    var hadPhoto = !!App.state.photo;
+    App.set({
+      error: err.message,
+      state: hadPhoto ? App.state.state : 'idle',
+      photo: hadPhoto ? App.state.photo : null,
+    });
   });
 }
 
@@ -974,6 +1073,22 @@ function onStopClick() {
   var entry = makeLogEntry(s.generation, winnerIndex, source, hints,
     s.winner ? 'stopped' : 'stopped before a pick – used cell 1');
   finishRun(winnerIndex, entry);
+}
+
+/* triggerPortraitDownload() (Task 7): what the "s" keyboard shortcut does on the done
+   screen – the same download the visible "Download portrait PNG" link performs, fired
+   programmatically since that link is rebuilt fresh on every render and has no stable
+   ref to click(). A no-op if there is no portrait yet (state !== 'done' is already
+   checked by the caller, but the data URL is checked again here as a hard guard). */
+function triggerPortraitDownload() {
+  var s = App.state;
+  if (!s.portraitDataUrl) return;
+  var link = document.createElement('a');
+  link.href = s.portraitDataUrl;
+  link.download = 'likeness-portrait.png';
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
 }
 
 function onCellPick(index) {
@@ -1063,13 +1178,41 @@ function onKeyChange(value) {
     }
   });
 
-  // keyboard: 1-9 pick a candidate, enter advances the review immediately once a
-  // winner exists. Bound once here (not per-render) so listeners never pile up.
+  /* keyboard (spec §5, Task 7): 1-9 pick a candidate, space pauses/resumes, enter
+     advances the review immediately once a winner exists, s saves the portrait once
+     done. Bound once here (not per-render) so listeners never pile up.
+
+     Two guards keep this from double-firing or hijacking normal typing/interaction:
+     - text inputs/selects are skipped outright, so typing a provider model name or
+       pasting a key never triggers a shortcut.
+     - a focused <button>/<a>/grid cell already has its own native or explicit
+       space/enter handling (native click-activation for buttons/links, the per-cell
+       keydown listener for cells); letting this global listener also act on the same
+       keystroke would either double-fire (e.g. Space on the Pause button toggling
+       twice) or steal Space away from "pick this focused candidate". Those two keys
+       are skipped whenever an interactive control already owns them; digits and s
+       don't have that conflict since nothing else binds them. */
   window.addEventListener('keydown', function (ev) {
-    var tag = (ev.target && ev.target.tagName) || '';
+    var target = ev.target;
+    var tag = (target && target.tagName) || '';
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+    var ownedByFocusedControl = tag === 'BUTTON' || tag === 'A' ||
+      (target && target.classList && target.classList.contains('cell'));
     var s = App.state;
+
+    if (ev.key === ' ' || ev.code === 'Space') {
+      if (ownedByFocusedControl) return; // let the focused button/cell handle its own Space
+      if (s.state === 'running') { ev.preventDefault(); onPauseResumeClick(); }
+      return;
+    }
+
+    if (ev.key === 's' || ev.key === 'S') {
+      if (s.state === 'done') { ev.preventDefault(); triggerPortraitDownload(); }
+      return;
+    }
+
     if (s.state !== 'running' || (s.phase !== 'reviewing' && s.phase !== 'paused')) return;
+
     if (ev.key >= '1' && ev.key <= '9') {
       var idx = parseInt(ev.key, 10);
       if (s.population && idx <= s.population.length) {
@@ -1077,6 +1220,7 @@ function onKeyChange(value) {
         onCellPick(idx);
       }
     } else if (ev.key === 'Enter') {
+      if (ownedByFocusedControl) return; // the focused button/cell already handles its own Enter
       if (s.winner) { ev.preventDefault(); advanceGeneration(); }
     }
   });

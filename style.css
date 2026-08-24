@@ -152,6 +152,11 @@ body.edu { background: var(--paper); color: var(--ink); font-family: var(--font-
   border-radius: var(--r-md);
   padding: 14px;
 }
+/* phase transitions as short fades (Task 7): every App.set() rebuilds the center
+   column from scratch, so a freshly-created .col-center fades in on every state/phase
+   change – Start, judging -> reviewing, a generation advancing, reaching done, etc. */
+.col-center { animation: panel-fade-in 0.2s ease-out; }
+@keyframes panel-fade-in { from { opacity: 0; } to { opacity: 1; } }
 .panel h2 {
   margin: 0 0 10px;
   font-family: var(--font-display);
@@ -196,6 +201,14 @@ body.edu { background: var(--paper); color: var(--ink); font-family: var(--font-
 .settings-note { color: var(--ink-3); font-size: 0.76rem; line-height: 1.5; margin: 8px 0 0; }
 .settings-error { color: var(--marigold-ink); font-size: 0.8rem; margin: 8px 0 0; }
 
+/* sr-only: visually hidden but still reachable by assistive tech (the standard
+   clip-based technique) – used for the #live-announcer aria-live region so its text
+   is announced without taking up any visible layout space. */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+
 .judging-indicator {
   display: inline-block; width: 8px; height: 8px; border-radius: 50%;
   background: var(--marigold); margin-right: 6px; vertical-align: middle;
@@ -206,8 +219,35 @@ body.edu { background: var(--paper); color: var(--ink); font-family: var(--font-
 .col-center { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
 
 .controls-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.controls-bar .progress-placeholder { margin-left: auto; font-family: var(--font-mono); font-size: 0.78rem; color: var(--ink-2); }
 .controls-bar .review-status { font-family: var(--font-mono); font-size: 0.78rem; color: var(--teal-ink); }
+
+/* progress bar: "generation g / 10", visible only while a run is under way. The
+   track (.progress-bar-track) is a fixed-width background bar; .progress-bar-fill
+   is the inner element whose width is set inline from app.js as a percentage. */
+.progress-bar {
+  margin-left: auto; display: flex; align-items: center; gap: 8px;
+  width: 150px; max-width: 40vw;
+}
+.progress-bar-fill {
+  height: 6px; width: 0; border-radius: var(--r-pill);
+  background: var(--marigold); transition: width 0.3s ease;
+}
+.progress-bar-fill-track {
+  flex: 1 1 auto; height: 6px; border-radius: var(--r-pill);
+  background: var(--paper-3); overflow: hidden;
+}
+.progress-bar-label { font-family: var(--font-mono); font-size: 0.72rem; color: var(--ink-2); white-space: nowrap; }
+
+/* review countdown bar (Task 7): thin bar draining over REVIEW_MS; width transitions
+   are driven from app.js (renderReviewBar), disabled globally under reduced motion. */
+.review-bar {
+  height: 3px; width: 100%; border-radius: var(--r-pill);
+  background: var(--paper-3); overflow: hidden;
+}
+.review-bar-fill {
+  height: 100%; width: 100%; background: var(--teal);
+  transition-property: width; transition-timing-function: linear;
+}
 
 #grid {
   display: grid;
@@ -221,7 +261,8 @@ body.edu { background: var(--paper); color: var(--ink); font-family: var(--font-
   border-radius: var(--r-sm);
   padding: 6px;
   cursor: pointer;
-  transition: border-color 0.15s, transform 0.1s ease;
+  transition: border-color 0.15s;
+  animation: cell-fade-in 0.25s ease-out;
 }
 .cell:hover { border-color: var(--teal); }
 .cell:focus-visible { outline: none; box-shadow: var(--focus-ring); }
@@ -232,8 +273,13 @@ body.edu { background: var(--paper); color: var(--ink); font-family: var(--font-
   font-family: var(--font-mono); font-size: 0.72rem; font-weight: 600;
   border-radius: var(--r-pill); padding: 1px 7px; border: 1px solid var(--line-2);
 }
-.cell.is-winner { border-color: var(--marigold); }
+/* winner highlight (Task 7): an opacity fade, not a shape/position change – a new
+   .is-winner cell is a freshly-rendered DOM node each time (render() rebuilds the
+   whole grid), so this animation naturally replays on every new pick or override. */
+.cell.is-winner { border-color: var(--marigold); animation: cell-winner-fade 0.5s ease-out; }
 .cell.is-winner .cell-badge { background: var(--marigold-soft); color: var(--marigold-ink); border-color: var(--marigold); }
+@keyframes cell-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes cell-winner-fade { 0% { opacity: 0.35; } 100% { opacity: 1; } }
 
 .col-right { display: flex; flex-direction: column; gap: 14px; }
 #log { display: flex; flex-direction: column; gap: 6px; max-height: 70vh; overflow-y: auto; }
@@ -280,4 +326,19 @@ body.edu { background: var(--paper); color: var(--ink); font-family: var(--font-
     padding: 12px 14px 8px;
   }
   #grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* prefers-reduced-motion (Task 7): collapse every animation/transition in the app to
+   effectively instant, everywhere, rather than special-casing each one (judging pulse,
+   winner fade, phase fade, the review countdown bar's width transition, the button
+   press scale). This is the standard universal override – it still lets the final
+   state apply (fill widths, opacity, colors all still land), it just removes the
+   motion getting there. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
 }

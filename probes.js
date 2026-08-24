@@ -152,8 +152,9 @@
 
   /* probe 5 (§7.4, §4.3): sanitizeJudgeReply() fixtures – valid reply; garbage text;
      out-of-range best; unknown traits mixed with known; JSON embedded in prose; a
-     brace inside a quoted suggestion string; more than 4 hints. Each fixture's actual
-     result is compared to its expected result by JSON.stringify. */
+     brace inside a quoted suggestion string; an escaped quote followed by a brace
+     inside a suggestion string; more than 4 hints. Each fixture's actual result is
+     compared to its expected result by JSON.stringify. */
   function sanitizerFixtures() {
     var sanitize = window.Genome.sanitizeJudgeReply;
     var fixtures = [
@@ -187,6 +188,17 @@
         name: 'brace inside a quoted suggestion string',
         text: '{"best": 6, "hints": [{"trait":"mouth","suggestion":"smile :}"}]}',
         expected: { best: 6, hints: [{ trait: 'mouth', suggestion: 'smile :}' }] },
+      },
+      {
+        /* Task 7: exercises the escape branch specifically – a backslash-escaped quote
+           immediately followed by a brace inside the suggestion string. Without the
+           `escaped` bookkeeping in extractFirstJsonObject's string-aware scan, the \"
+           could be mis-read as closing the string one character early, making the
+           following } look like real object structure and truncating/corrupting the
+           extracted block. */
+        name: 'escaped quote followed by a brace inside a suggestion string',
+        text: '{"best": 4, "hints": [{"trait":"nose","suggestion":"say \\"hi}\\" now"}]}',
+        expected: { best: 4, hints: [{ trait: 'nose', suggestion: 'say "hi}" now' }] },
       },
       {
         name: 'more than 4 hints gets capped at 4',
@@ -229,7 +241,7 @@
     { name: 'repair validity: 500 mutations all repair-idempotent', fn: repairValidity },
     { name: 'stratification: 50 initialPopulation() calls satisfy §3.5', fn: stratification },
     { name: 'elitism: cell 1 hash equals previous winner across 3 generations', fn: elitism },
-    { name: 'sanitizer: 7 fixture replies parse to expected results', fn: sanitizerFixtures },
+    { name: 'sanitizer: 8 fixture replies parse to expected results', fn: sanitizerFixtures },
   ];
 
   var Probes = {
