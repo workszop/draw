@@ -36,6 +36,9 @@
   --teal-600: #0B7468;
   --teal-soft: #D2EBE6;
   --teal-ink: #0A5A52;
+
+  /* ── type ── */
+  --font-ui: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
 /* ─── Dev harness (dev.html): plain layout, tokens only ─── */
@@ -44,7 +47,7 @@ body.dev {
   padding: 24px clamp(16px, 4vw, 48px);
   background: var(--paper);
   color: var(--ink);
-  font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: 15px/1.5 var(--font-ui);
 }
 body.dev h1 { font-size: 1.35rem; margin: 0 0 4px; }
 body.dev h2 { font-size: 1rem; margin: 28px 0 10px; color: var(--ink-2); letter-spacing: 0.04em; text-transform: uppercase; }

@@ -179,15 +179,15 @@
     var soft = softOf(g.gender);
 
     /* index genes: null stays null, anything else has to land inside the token array */
+    if (g.hairTintIdx === undefined) g.hairTintIdx = null;   // an omitted nullable index means "no wash"
+    if (g.skinIdx === undefined) g.skinIdx = null;
+    if (g.hatWashIdx === undefined) g.hatWashIdx = null;
     if (!idxOk(g.hairFillIdx, 4)) g.hairFillIdx = riR(rand, 0, 3);
     if (g.hairTintIdx !== null && !idxOk(g.hairTintIdx, 4)) g.hairTintIdx = riR(rand, 0, 3);
     if (g.skinIdx !== null && !idxOk(g.skinIdx, 7)) g.skinIdx = riR(rand, 0, 6);
     if (g.hatWashIdx !== null && !idxOk(g.hatWashIdx, 5)) g.hatWashIdx = riR(rand, 0, 4);
     if (!idxOk(g.accentIdx, 3)) g.accentIdx = riR(rand, 0, 2);
     if (!idxOk(g.inkIdx, 6)) g.inkIdx = riR(rand, 0, 5);
-    if (g.hairTintIdx === undefined) g.hairTintIdx = null;
-    if (g.skinIdx === undefined) g.skinIdx = null;
-    if (g.hatWashIdx === undefined) g.hatWashIdx = null;
 
     /* hair style has to be valid for the age (the child set included) */
     var valid = HAIR_VALID[g.age];
@@ -1030,20 +1030,24 @@
 
   var Genome = {
     GENES: GENES,
-    GENE_NAMES: GENE_NAMES,
-    HAIR_VALID: HAIR_VALID,
-    HAT_STYLES: HAT_STYLES,
-    NO_BOW_STYLES: NO_BOW_STYLES,
-    hairTable: hairTable,
     randomGenome: randomGenome,
     repair: repair,
     drawFace: drawFace,
     renderGenome: renderGenome,
     genomeHash: genomeHash,
-    mulberry32: mulberry32Local,
     mutate: function () { throw new Error('Genome.mutate not implemented yet'); },
     HINT_MAP: {},
     initialPopulation: function () { throw new Error('Genome.initialPopulation not implemented yet'); },
+    /* the one member outside the namespace contract: shared utilities the dev pages,
+       the probes and the Node checks may lean on. Not part of the app's public surface. */
+    _internal: {
+      GENE_NAMES: GENE_NAMES,
+      HAIR_VALID: HAIR_VALID,
+      HAT_STYLES: HAT_STYLES,
+      NO_BOW_STYLES: NO_BOW_STYLES,
+      hairTable: hairTable,
+      mulberry32: mulberry32Local,
+    },
   };
 
   if (typeof module !== 'undefined' && module.exports) {

@@ -107,7 +107,7 @@
     }
 
     function renderSheet(seed) {
-      var rand = window.Genome.mulberry32(seed);
+      var rand = window.Genome._internal.mulberry32(seed);
       sheetEl.textContent = '';
       for (var i = 0; i < 9; i++) {
         var g = window.Genome.randomGenome(rand);
