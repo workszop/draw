@@ -187,6 +187,7 @@ body.edu { background: var(--paper); color: var(--ink); font-family: var(--font-
 
 .controls-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .controls-bar .progress-placeholder { margin-left: auto; font-family: var(--font-mono); font-size: 0.78rem; color: var(--ink-2); }
+.controls-bar .review-status { font-family: var(--font-mono); font-size: 0.78rem; color: var(--teal-ink); }
 
 #grid {
   display: grid;
@@ -225,6 +226,18 @@ body.edu { background: var(--paper); color: var(--ink); font-family: var(--font-
 }
 .log-entry[data-source="manual"] { border-left-color: var(--teal); }
 .log-entry[data-source="ai"] { border-left-color: var(--marigold); }
+
+.done-panel { display: flex; flex-direction: column; gap: 16px; }
+.done-portrait, .done-composite { margin: 0; }
+.done-portrait img, .done-composite img {
+  display: block; max-width: 100%; height: auto;
+  border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--paper-2);
+}
+.done-portrait figcaption, .done-composite figcaption { margin-top: 6px; font-size: 0.78rem; color: var(--ink-2); }
+.done-status { color: var(--ink-3); font-size: 0.82rem; }
+.done-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.done-actions a.edu-btn { text-decoration: none; display: inline-flex; align-items: center; }
+.done-actions .is-disabled { opacity: 0.45; pointer-events: none; }
 
 .edu-footer {
   max-width: 1400px;

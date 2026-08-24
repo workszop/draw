@@ -613,6 +613,31 @@
     return out;
   }
 
+  /* copyGenome(genome) -> a fresh object with every GENE_NAMES key copied, nothing
+     shared with the input. Used for the elite slot below, which must be byte-identical
+     to the winner (hash-verified, spec §7.3), never run back through mutate(). */
+  function copyGenome(genome) {
+    var out = {};
+    for (var i = 0; i < GENE_NAMES.length; i++) out[GENE_NAMES[i]] = genome[GENE_NAMES[i]];
+    return out;
+  }
+
+  // ─── Helpers: generation loop step ───
+
+  /* nextPopulation(winner, generation, hintedGenes, rand) (spec §3.4 loop step): cell 1
+     is an exact elite copy of the winner (same genomeHash, never re-mutated); cells 2-9
+     are mutate(winner, generation, hintedGenes, rand). Pure – no DOM, no window/document
+     – so both the app's real loop and the elitism probe (dev.html, no app.js) share this
+     one code path (spec §7.3). */
+  function nextPopulation(winner, generation, hintedGenes, rand) {
+    rand = rand || Math.random;
+    var pop = [copyGenome(winner)];
+    for (var i = 0; i < 8; i++) {
+      pop.push(mutate(winner, generation, hintedGenes, rand));
+    }
+    return pop;
+  }
+
   // ─── Render: the marker box, resolved lazily so genome.js loads without a DOM ───
 
   function C() {
@@ -1372,6 +1397,7 @@
       hairArchetype: hairArchetype,
       hairTable: hairTable,
       mulberry32: mulberry32Local,
+      nextPopulation: nextPopulation,
     },
   };
 

@@ -19,7 +19,9 @@ var PHOTO_JPEG_QUALITY = 0.8;
 var MAX_FILE_BYTES = 20 * 1024 * 1024; // 20 MB – generous guard against pathological uploads
 var CELL_W = 200, CELL_H = 250;          // on-screen grid cell canvas size
 var COMPOSITE_CELL_W = 300, COMPOSITE_CELL_H = 375; // buildGridJpeg() cell size (~300px per spec)
-var TOTAL_GENERATIONS = 10;
+var MAX_GENERATIONS = 10;
+var REVIEW_MS = 3500;                    // reviewing phase: auto-advance once a winner exists
+var COMPOSITE_GAP = 24;                  // px gap between photo and portrait in the done composite
 
 // ─── State ───
 
@@ -35,6 +37,9 @@ var App = {
     log: [],
     error: null,
     photo: null,             // { previewUrl, jpegDataUrl, width, height } | null
+    doneGenome: null,        // final winner genome, set on state 'done'
+    portraitDataUrl: null,   // 2x-rendered final portrait PNG, set on state 'done'
+    compositeDataUrl: null,  // photo+portrait side-by-side PNG, built async on state 'done'
   },
   population: null,          // mirrors state.population for the DOM contract (§7)
   debug: {
@@ -52,6 +57,13 @@ var App = {
     render();
   },
 };
+
+/* review timer bookkeeping – runtime-only, not part of App.state (nothing here is
+   meant to be serializable or rendered from); kept as plain closure vars so the
+   timer can never leak across an App.set() re-render. */
+var reviewTimerId = null;
+var reviewDeadline = null;     // Date.now() timestamp the timer will fire at, or null
+var reviewRemainingMs = null;  // ms left when Pause froze a running timer, or null
 
 // ─── DOM refs ───
 
@@ -167,9 +179,121 @@ function buildGridJpeg(population) {
   return composite.toDataURL('image/jpeg', 0.85);
 }
 
-function appendLog(gen, best, source, detail) {
-  var entry = { gen: gen, best: best, source: source, detail: detail || '' };
-  App.set({ log: App.state.log.concat([entry]) });
+/* makeLogEntry(gen, best, source, hints, detail) – pure, does not touch state; callers
+   combine the returned entry into the same App.set() that also advances the run, so a
+   generation's log line and its state transition land in a single re-render. */
+function makeLogEntry(gen, best, source, hints, detail) {
+  return { gen: gen, best: best, source: source, hints: hints || [], detail: detail || '' };
+}
+
+// ─── Helpers: review timer (drives REVIEW_MS auto-advance; Pause/Resume freezes it) ───
+
+function clearReviewTimer() {
+  if (reviewTimerId !== null) { window.clearTimeout(reviewTimerId); reviewTimerId = null; }
+  reviewDeadline = null;
+}
+
+/* startReviewTimer(ms) – (re)starts the auto-advance countdown from `ms` (defaults to
+   the full REVIEW_MS window). Called whenever a winner is (re)picked, and by Resume
+   with whatever time Pause had left. */
+function startReviewTimer(ms) {
+  clearReviewTimer();
+  var wait = ms === undefined ? REVIEW_MS : ms;
+  reviewDeadline = Date.now() + wait;
+  reviewTimerId = window.setTimeout(advanceGeneration, wait);
+}
+
+// ─── Helpers: GA loop ───
+
+/* buildPortraitCanvas(genome) -> canvas rendered at 2x cell resolution. renderGenome
+   scales its strokes to the canvas it is given, so a bigger canvas re-renders sharper
+   strokes rather than upscaling pixels of a smaller render. */
+function buildPortraitCanvas(genome) {
+  var canvas = document.createElement('canvas');
+  canvas.width = CELL_W * 2;
+  canvas.height = CELL_H * 2;
+  window.Genome.renderGenome(canvas, genome);
+  return canvas;
+}
+
+/* buildComposite(photo, portraitCanvas, callback) – async (Image decode): photo left,
+   portrait right, equal heights, paper background from tokens read at call time.
+   callback(dataUrl) fires once, with null if the stored photo data URL fails to decode
+   (the portrait download still works on its own in that case). */
+function buildComposite(photo, portraitCanvas, callback) {
+  var paper = tok('--paper');
+  var img = new Image();
+  img.onload = function () {
+    var targetH = portraitCanvas.height;
+    var photoW = Math.max(1, Math.round(img.width * (targetH / img.height)));
+    var composite = document.createElement('canvas');
+    composite.width = photoW + COMPOSITE_GAP + portraitCanvas.width;
+    composite.height = targetH;
+    var ctx = composite.getContext('2d');
+    ctx.fillStyle = paper;
+    ctx.fillRect(0, 0, composite.width, composite.height);
+    ctx.drawImage(img, 0, 0, photoW, targetH);
+    ctx.drawImage(portraitCanvas, photoW + COMPOSITE_GAP, 0);
+    callback(composite.toDataURL('image/png'));
+  };
+  img.onerror = function () { callback(null); };
+  img.src = photo.jpegDataUrl;
+}
+
+/* finishRun(winnerIndex, entry) – common end of the run for both "gen 10 done" and
+   "Stop pressed early": clears the timer, renders the 2x portrait, appends the final
+   log entry, flips state to 'done', then builds the side-by-side composite async. */
+function finishRun(winnerIndex, entry) {
+  clearReviewTimer();
+  var s = App.state;
+  var genome = s.population[winnerIndex - 1];
+  var portraitCanvas = buildPortraitCanvas(genome);
+  var portraitDataUrl = portraitCanvas.toDataURL('image/png');
+
+  App.set({
+    state: 'done',
+    phase: null,
+    winner: winnerIndex,
+    winnerSource: 'manual',
+    doneGenome: genome,
+    portraitDataUrl: portraitDataUrl,
+    compositeDataUrl: null,
+    log: s.log.concat([entry]),
+  });
+
+  buildComposite(App.state.photo, portraitCanvas, function (compositeDataUrl) {
+    if (App.state.state !== 'done') return; // Start over / New photo raced ahead – drop it
+    App.set({ compositeDataUrl: compositeDataUrl });
+  });
+}
+
+/* advanceGeneration() – the winner becomes cell 1 (exact elite copy) of generation g+1;
+   cells 2-9 are Genome._internal.nextPopulation's mutants. Fires on REVIEW_MS timeout
+   or an immediate 'enter'. At MAX_GENERATIONS the run ends instead of building g+1. */
+function advanceGeneration() {
+  var s = App.state;
+  if (s.state !== 'running' || s.phase !== 'reviewing' || !s.winner) return;
+  clearReviewTimer();
+
+  var winnerIndex = s.winner;
+  var winnerGenome = s.population[winnerIndex - 1];
+  var entry = makeLogEntry(s.generation, winnerIndex, 'manual', []);
+
+  if (s.generation >= MAX_GENERATIONS) {
+    finishRun(winnerIndex, entry);
+    return;
+  }
+
+  var nextGen = s.generation + 1;
+  var nextPopulation = window.Genome._internal.nextPopulation(winnerGenome, nextGen, new Map(), Math.random);
+  App.set({
+    generation: nextGen,
+    population: nextPopulation,
+    winner: null,
+    winnerSource: null,
+    phase: 'reviewing',
+    log: s.log.concat([entry]),
+  });
 }
 
 // ─── Render ───
@@ -248,6 +372,8 @@ function renderLeftColumn(s) {
 }
 
 function renderCenterColumn(s) {
+  if (s.state === 'done') return renderDoneCenter(s);
+
   var col = el('div', { class: 'col-center' });
 
   // ── controls bar ──
@@ -268,13 +394,21 @@ function renderCenterColumn(s) {
 
   var progress = el('span', {
     class: 'progress-placeholder',
-    text: 'Generation ' + (s.generation || 0) + ' / ' + TOTAL_GENERATIONS,
+    text: 'Generation ' + (s.generation || 0) + ' / ' + MAX_GENERATIONS,
   });
+
+  var status = el('span', { class: 'review-status' });
+  if (s.state === 'running') {
+    if (s.phase === 'paused') status.textContent = 'Paused';
+    else if (s.winner) status.textContent = 'Winner picked – advancing soon (press Enter now)';
+    else status.textContent = 'Pick a candidate: click a cell or press 1-9';
+  }
 
   bar.appendChild(startBtn);
   bar.appendChild(pauseBtn);
   bar.appendChild(stopBtn);
   bar.appendChild(progress);
+  bar.appendChild(status);
   col.appendChild(bar);
 
   // ── grid ──
@@ -323,6 +457,64 @@ function renderCell(s, i) {
   return cell;
 }
 
+/* renderDoneCenter(s) – the done screen: 2x final portrait, side-by-side composite
+   (photo left, portrait right, equal heights, paper background), both PNG downloads,
+   Start over (same photo, fresh gen 1) and New photo (back to idle). */
+function renderDoneCenter(s) {
+  var col = el('div', { class: 'col-center' });
+  var panel = el('div', { class: 'panel done-panel' });
+  panel.appendChild(el('h2', { text: 'Done – generation ' + s.generation + ' of ' + MAX_GENERATIONS }));
+
+  var portraitFig = el('figure', { class: 'done-portrait' });
+  var portraitImg = el('img', { alt: 'Final evolved portrait' });
+  portraitImg.src = s.portraitDataUrl;
+  portraitFig.appendChild(portraitImg);
+  portraitFig.appendChild(el('figcaption', { text: 'Final portrait (2x)' }));
+  panel.appendChild(portraitFig);
+
+  var compFig = el('figure', { class: 'done-composite' });
+  if (s.compositeDataUrl) {
+    var compImg = el('img', { alt: 'Photo and final portrait side by side' });
+    compImg.src = s.compositeDataUrl;
+    compFig.appendChild(compImg);
+    compFig.appendChild(el('figcaption', { text: 'Photo vs. portrait' }));
+  } else {
+    compFig.appendChild(el('p', { class: 'done-status', text: 'Building side-by-side composite…' }));
+  }
+  panel.appendChild(compFig);
+
+  var actions = el('div', { class: 'done-actions' });
+
+  var portraitLink = el('a', {
+    class: 'edu-btn', download: 'likeness-portrait.png', text: 'Download portrait PNG',
+  });
+  portraitLink.href = s.portraitDataUrl;
+  actions.appendChild(portraitLink);
+
+  var compositeLink = el('a', {
+    class: 'edu-btn ghost', download: 'likeness-side-by-side.png', text: 'Download side-by-side PNG',
+  });
+  if (s.compositeDataUrl) {
+    compositeLink.href = s.compositeDataUrl;
+  } else {
+    compositeLink.classList.add('is-disabled');
+    compositeLink.setAttribute('aria-disabled', 'true');
+  }
+  actions.appendChild(compositeLink);
+
+  var startOverBtn = el('button', { class: 'edu-btn ghost', type: 'button', text: 'Start over' });
+  startOverBtn.addEventListener('click', onStartOverClick);
+  actions.appendChild(startOverBtn);
+
+  var newPhotoBtn = el('button', { class: 'edu-btn ghost', type: 'button', text: 'New photo' });
+  newPhotoBtn.addEventListener('click', onNewPhotoClick);
+  actions.appendChild(newPhotoBtn);
+
+  panel.appendChild(actions);
+  col.appendChild(panel);
+  return col;
+}
+
 function renderRightColumn(s) {
   var col = el('div', { class: 'col-right' });
   var panel = el('div', { class: 'panel' });
@@ -334,8 +526,10 @@ function renderRightColumn(s) {
       'data-gen': String(entry.gen),
       'data-best': String(entry.best),
       'data-source': entry.source,
+      'data-hints': String((entry.hints || []).length),
     });
     line.textContent = 'Gen ' + entry.gen + ' – best ' + entry.best + ' (' + entry.source + ')' +
+      ' – hints: ' + (entry.hints && entry.hints.length ? entry.hints.join(', ') : 'none') +
       (entry.detail ? ' – ' + entry.detail : '');
     log.appendChild(line);
   });
@@ -347,6 +541,9 @@ function renderRightColumn(s) {
 // ─── Listeners (event handlers referenced above) ───
 
 function handlePhotoFile(file) {
+  // photo intake is only meaningful before/between runs – ignore accidental
+  // drops/pastes/clicks on the (still-present) upload zone mid-run or on the done screen
+  if (App.state.state === 'running' || App.state.state === 'done') return;
   readPhotoFile(file).then(function (photo) {
     App.set({ state: 'ready', error: null, photo: photo });
   }).catch(function (err) {
@@ -370,22 +567,59 @@ function onStartClick() {
 function onPauseResumeClick() {
   var s = App.state;
   if (s.state !== 'running') return;
-  if (s.phase === 'paused') App.set({ phase: 'reviewing' });
-  else if (s.phase === 'reviewing') App.set({ phase: 'paused' });
+  if (s.phase === 'paused') {
+    if (s.winner && reviewRemainingMs !== null) {
+      startReviewTimer(reviewRemainingMs);
+      reviewRemainingMs = null;
+    }
+    App.set({ phase: 'reviewing' });
+  } else if (s.phase === 'reviewing') {
+    if (s.winner && reviewTimerId !== null) {
+      reviewRemainingMs = Math.max(0, reviewDeadline - Date.now());
+      clearReviewTimer();
+    }
+    App.set({ phase: 'paused' });
+  }
 }
 
 function onStopClick() {
-  if (App.state.state !== 'running') return;
-  // Task 4 skeleton: Stop aborts the run and returns to ready. The full
-  // "finish now with current best" -> done transition lands in Task 5.
-  App.set({ state: 'ready', phase: null, population: null, generation: 0, winner: null, winnerSource: null });
+  var s = App.state;
+  if (s.state !== 'running') return;
+  var winnerIndex = s.winner || 1; // no pick yet: fall back to cell 1 as "current best"
+  var entry = makeLogEntry(s.generation, winnerIndex, 'manual', [],
+    s.winner ? 'stopped' : 'stopped before a pick – used cell 1');
+  finishRun(winnerIndex, entry);
 }
 
 function onCellPick(index) {
   var s = App.state;
   if (s.state !== 'running' || s.phase !== 'reviewing') return;
+  if (!s.population || index < 1 || index > s.population.length) return;
   App.set({ winner: index, winnerSource: 'manual' });
-  appendLog(s.generation, index, 'manual', 'override');
+  startReviewTimer(); // (re)start the full REVIEW_MS window on every pick, including overrides
+}
+
+function onStartOverClick() {
+  // same photo, fresh gen 1: reuse the photo already in state, drop everything else,
+  // then run the exact Start path so gen 1 gets a brand-new initialPopulation()
+  clearReviewTimer();
+  reviewRemainingMs = null;
+  App.set({
+    state: 'ready', phase: null, population: null, generation: 0,
+    winner: null, winnerSource: null, log: [], error: null,
+    doneGenome: null, portraitDataUrl: null, compositeDataUrl: null,
+  });
+  onStartClick();
+}
+
+function onNewPhotoClick() {
+  clearReviewTimer();
+  reviewRemainingMs = null;
+  App.set({
+    state: 'idle', phase: null, population: null, generation: 0,
+    winner: null, winnerSource: null, log: [], error: null, photo: null,
+    doneGenome: null, portraitDataUrl: null, compositeDataUrl: null,
+  });
 }
 
 // ─── Init ───
@@ -401,6 +635,24 @@ function onCellPick(index) {
         handlePhotoFile(items[i].getAsFile());
         break;
       }
+    }
+  });
+
+  // keyboard: 1-9 pick a candidate, enter advances the review immediately once a
+  // winner exists. Bound once here (not per-render) so listeners never pile up.
+  window.addEventListener('keydown', function (ev) {
+    var tag = (ev.target && ev.target.tagName) || '';
+    if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+    var s = App.state;
+    if (s.state !== 'running' || s.phase !== 'reviewing') return;
+    if (ev.key >= '1' && ev.key <= '9') {
+      var idx = parseInt(ev.key, 10);
+      if (s.population && idx <= s.population.length) {
+        ev.preventDefault();
+        onCellPick(idx);
+      }
+    } else if (ev.key === 'Enter') {
+      if (s.winner) { ev.preventDefault(); advanceGeneration(); }
     }
   });
 

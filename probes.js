@@ -118,11 +118,44 @@
     };
   }
 
+  /* probe 4 (§7.3): elitism. A simulated 3-generation run over the pure
+     Genome._internal.nextPopulation(winner, generation, hintedGenes, rand) – the same
+     helper app.js's real loop calls – must always put an exact copy of the winner in
+     cell 1 (hash-identical, never re-mutated). Each step's cell 1 becomes the next
+     step's winner, so a single dropped elite anywhere in the chain fails the probe.
+     Runs headless in dev.html without app.js, per the brief. */
+  function elitism() {
+    var Genome = window.Genome;
+    var rand = Genome._internal.mulberry32(0xE1173D);
+    var winner = Genome.randomGenome(rand);
+    var fails = [];
+    for (var gen = 2; gen <= 4; gen++) {
+      var pop = Genome._internal.nextPopulation(winner, gen, new Map(), rand);
+      if (!Array.isArray(pop) || pop.length !== 9) {
+        fails.push('gen ' + gen + ': population was not 9 genomes');
+        break;
+      }
+      var winnerHash = Genome.genomeHash(winner);
+      var cell1Hash = Genome.genomeHash(pop[0]);
+      if (cell1Hash !== winnerHash) {
+        fails.push('gen ' + gen + ': cell 1 hash ' + cell1Hash + ' != winner hash ' + winnerHash);
+      }
+      winner = pop[0]; // simulate always picking the elite again, chaining the check
+    }
+    return {
+      pass: fails.length === 0,
+      detail: fails.length === 0
+        ? 'elite genome hash preserved in cell 1 across 3 simulated generations'
+        : fails.join(' | '),
+    };
+  }
+
   /* every check carries its descriptive name, so a thrower still reports under it */
   var CHECKS = [
     { name: 'determinism: same genome renders identically', fn: determinism },
     { name: 'repair validity: 500 mutations all repair-idempotent', fn: repairValidity },
     { name: 'stratification: 50 initialPopulation() calls satisfy §3.5', fn: stratification },
+    { name: 'elitism: cell 1 hash equals previous winner across 3 generations', fn: elitism },
   ];
 
   var Probes = {
