@@ -62,6 +62,20 @@
   var HAIR_VALID = {};
   AGES.forEach(function (age) { HAIR_VALID[age] = Object.keys(hairTable(age, 1, 1)); });
 
+  /* hair_length hint (spec §4.2): the subsets mutate() re-picks from for "longer"/"shorter" */
+  var HAIR_LONG = ['long', 'bob', 'afro', 'pigtails', 'ponytail', 'braids', 'shaggy', 'curly'];
+  var HAIR_SHORT = ['buzz', 'spiky', 'bowl', 'comb', 'sidepart', 'bald', 'wisps'];
+
+  /* stratification archetype (spec §3.5) for initialPopulation: every hairStyle falls
+     into exactly one of three coverage buckets, distinct from the hint subsets above. */
+  var HAIR_ARCHETYPE_LONG = ['long', 'bob', 'bun', 'afro', 'pigtails', 'ponytail', 'braids', 'shaggy', 'curly'];
+  var HAIR_ARCHETYPE_HAT = ['bald', 'wisps', 'mohawk', 'band', 'cap', 'beanie', 'fedora', 'beret', 'headscarf'];
+  function hairArchetype(style) {
+    if (inList(style, HAIR_ARCHETYPE_LONG)) return 'long';
+    if (inList(style, HAIR_ARCHETYPE_HAT)) return 'noneOrHat';
+    return 'short';
+  }
+
   function headWRange(age) {
     return age === 'child' ? [46, 60] : age === 'old' ? [54, 74] : [56, 76];
   }
@@ -290,6 +304,275 @@
       h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
     }
     return ('0000000' + h.toString(16)).slice(-8);
+  }
+
+  // ─── Helpers: mutation ───
+
+  /* p_base(generation) (spec §3.4): linear decay 0.35 at gen 2 down to 0.10 at gen 10,
+     clamped outside that range so a stray generation number never explodes the rate. */
+  function pBaseForGeneration(generation) {
+    var g = (typeof generation === 'number' && isFinite(generation)) ? generation : 2;
+    var p = 0.35 + (0.10 - 0.35) * (g - 2) / (10 - 2);
+    return p < 0.10 ? 0.10 : p > 0.35 ? 0.35 : p;
+  }
+
+  /* pick a value from arr other than current; falls back to current if arr has nothing else */
+  function pickOtherR(rand, arr, current) {
+    var choices = arr.filter(function (v) { return v !== current; });
+    return choices.length ? pickR(rand, choices) : current;
+  }
+  function pickNonNoneR(rand, arr) {
+    var choices = arr.filter(function (v) { return v !== 'none'; });
+    return choices.length ? pickR(rand, choices) : 'none';
+  }
+  /* uniform re-pick among 0..n-1 excluding current (non-nullable idx genes) */
+  function idxOtherR(rand, n, current) {
+    if (n <= 1) return 0;
+    var choices = [];
+    for (var i = 0; i < n; i++) if (i !== current) choices.push(i);
+    return pickR(rand, choices);
+  }
+  /* uniform re-pick among {null, 0..n-1} excluding current (nullable idx genes) */
+  function idxNullableOtherR(rand, n, current) {
+    var choices = [null];
+    for (var i = 0; i < n; i++) choices.push(i);
+    choices = choices.filter(function (v) { return v !== current; });
+    return choices.length ? pickR(rand, choices) : current;
+  }
+  /* step an idx gene 1-2 slots toward the hinted end (sign +1 = "darker"/higher index).
+     A null current (uncoloured) starts from the middle of the array before stepping –
+     skin-1..7 run lightest→darkest per style.css, so increasing index is "darker";
+     hair-1..4 / tint-1..4 are stylistic (not a lightness ramp) but follow the same
+     increasing-index-is-"darker" convention for consistency, documented here. */
+  function stepIdxToward(rand, current, n, sign) {
+    var base = (current === null || current === undefined) ? Math.floor((n - 1) / 2) : current;
+    var step = riR(rand, 1, 2) * sign;
+    var next = base + step;
+    return next < 0 ? 0 : next > n - 1 ? n - 1 : next;
+  }
+
+  /* mutateOneGene(g, name, direction, rand) – mutates g[name] in place. `direction` is
+     the hinted direction string or null (non-hinted, or hinted with no direction word). */
+  function mutateOneGene(g, name, direction, rand) {
+    var desc = GENES[name];
+    switch (name) {
+      case 'age': {
+        if (direction === 'older' || direction === 'younger') {
+          var idx = AGES.indexOf(g.age);
+          idx += direction === 'older' ? 1 : -1;
+          g.age = AGES[idx < 0 ? 0 : idx > AGES.length - 1 ? AGES.length - 1 : idx];
+        } else {
+          g.age = pickOtherR(rand, AGES, g.age);
+        }
+        return;
+      }
+      case 'skinIdx': case 'hairFillIdx': case 'hairTintIdx': {
+        var n = desc.n;
+        if (direction === 'darker' || direction === 'lighter') {
+          g[name] = stepIdxToward(rand, g[name], n, direction === 'darker' ? 1 : -1);
+        } else if (desc.nullable) {
+          g[name] = idxNullableOtherR(rand, n, g[name]);
+        } else {
+          g[name] = idxOtherR(rand, n, g[name]);
+        }
+        return;
+      }
+      case 'hairDark': {
+        if (direction === 'darker') g.hairDark = true;
+        else if (direction === 'lighter') g.hairDark = false;
+        else g.hairDark = !g.hairDark;
+        return;
+      }
+      case 'headW': {
+        if (direction === 'wider') g.headW = g.headW * 1.10;
+        else if (direction === 'narrower') g.headW = g.headW * 0.90;
+        else { var rw = desc.range(g.age); g.headW = rfR(rand, rw[0], rw[1]); }
+        return;
+      }
+      case 'headRatio': {
+        if (direction === 'longer') g.headRatio = g.headRatio * 1.08;
+        else if (direction === 'rounder') g.headRatio = g.headRatio * 0.92;
+        else { var rr = desc.range(g.age); g.headRatio = rfR(rand, rr[0], rr[1]); }
+        return;
+      }
+      case 'eyewear': {
+        if (direction === 'add') g.eyewear = pickNonNoneR(rand, EYEWEARS);
+        else if (direction === 'remove') g.eyewear = 'none';
+        else g.eyewear = pickOtherR(rand, EYEWEARS, g.eyewear);
+        return;
+      }
+      case 'stache': case 'beard': {
+        var domain = name === 'stache' ? STACHES : BEARDS;
+        if (direction === 'add') g[name] = pickNonNoneR(rand, domain);
+        else if (direction === 'remove') g[name] = 'none';
+        else if (direction === 'more' || direction === 'less') {
+          var di = domain.indexOf(g[name]);
+          if (di < 0) di = 0;
+          di += direction === 'more' ? 1 : -1;
+          g[name] = domain[di < 0 ? 0 : di > domain.length - 1 ? domain.length - 1 : di];
+        } else {
+          g[name] = pickOtherR(rand, domain, g[name]);
+        }
+        return;
+      }
+      case 'hairStyle': {
+        if (direction === 'longer' || direction === 'shorter') {
+          var subset = direction === 'longer' ? HAIR_LONG : HAIR_SHORT;
+          var valid = HAIR_VALID[g.age] || HAIR_VALID.adult;
+          var pool = subset.filter(function (s) { return inList(s, valid); });
+          if (!pool.length) pool = subset;
+          g.hairStyle = pickOtherR(rand, pool, g.hairStyle);
+        } else {
+          g.hairStyle = pickOtherR(rand, HAIR_STYLES, g.hairStyle);
+        }
+        return;
+      }
+      default: {
+        if (desc.type === 'cat') {
+          g[name] = pickOtherR(rand, desc.values, g[name]);
+        } else if (desc.type === 'bool') {
+          g[name] = !g[name];
+        } else if (desc.type === 'idx') {
+          g[name] = desc.nullable ? idxNullableOtherR(rand, desc.n, g[name]) : idxOtherR(rand, desc.n, g[name]);
+        } else if (desc.type === 'num') {
+          var rg = desc.range(g.age);
+          g[name] = rfR(rand, rg[0], rg[1]);
+        }
+        return;
+      }
+    }
+  }
+
+  /* mutate(genome, generation, hintedGenes, rand) (spec §3.4). hintedGenes is a
+     Map(geneName -> direction-or-null); rand defaults to Math.random so callers can
+     inject a seeded RNG for tests. Never mutates its input; always emits all gene
+     keys (copies every GENE_NAMES key before touching anything, and returns a
+     repair()-ed object, which itself rebuilds every key from scratch). */
+  function mutate(genome, generation, hintedGenes, rand) {
+    rand = rand || Math.random;
+    hintedGenes = hintedGenes instanceof Map ? hintedGenes : new Map();
+    var pBase = pBaseForGeneration(generation);
+    var g = {};
+    for (var i = 0; i < GENE_NAMES.length; i++) g[GENE_NAMES[i]] = genome[GENE_NAMES[i]];
+
+    for (i = 0; i < GENE_NAMES.length; i++) {
+      var name = GENE_NAMES[i];
+      if (name === 'wobbleSeed') continue;             // handled separately below
+      var hinted = hintedGenes.has(name);
+      var p = hinted ? 0.8 : pBase;
+      if (!chanceR(rand, p)) continue;
+      mutateOneGene(g, name, hinted ? hintedGenes.get(name) : null, rand);
+    }
+
+    /* wobbleSeed re-rolls with p = 0.3 regardless of hints/decay (texture variety) */
+    if (chanceR(rand, 0.3)) g.wobbleSeed = (rand() * 4294967296) | 0;
+
+    return repair(g);
+  }
+
+  // ─── Helpers: AI hint mapping ───
+
+  /* HINT_MAP (spec §4.2): trait -> the genes that hint boosts to p = 0.8 */
+  var HINT_MAP = {
+    age: ['age'],
+    gender: ['gender'],
+    expression: ['expr', 'mouthKind'],
+    hair_style: ['hairStyle'],
+    hair_length: ['hairStyle'],
+    hair_color: ['hairDark', 'hairFillIdx', 'hairTintIdx'],
+    skin_tone: ['skinIdx'],
+    face_shape: ['headW', 'headRatio'],
+    glasses: ['eyewear'],
+    facial_hair: ['stache', 'beard'],
+    eyes: ['eyeKind'],
+    eyebrows: ['browKind'],
+    nose: ['noseKind'],
+    mouth: ['mouthKind'],
+    gaze: ['look'],
+    accessories: ['bow', 'earrings', 'hatWashIdx'],
+  };
+
+  var DIRECTION_WORDS = ['darker', 'lighter', 'older', 'younger', 'longer', 'shorter',
+    'wider', 'narrower', 'rounder', 'add', 'remove', 'more', 'less'];
+
+  /* hintsToGenes(hints) -> Map(geneName -> direction|null). `hints` is expected to be
+     an array of {trait, suggestion} (spec §4.1); tolerant of garbage – a non-array
+     input, a null/non-object entry, a non-string suggestion, or an unknown trait are
+     all handled without throwing (the sanitizer proper is Task 6; this just maps). */
+  function hintsToGenes(hints) {
+    var map = new Map();
+    if (!Array.isArray(hints)) return map;
+    for (var i = 0; i < hints.length; i++) {
+      var h = hints[i];
+      if (!h || typeof h !== 'object') continue;
+      var genes = HINT_MAP[h.trait];
+      if (!genes) continue;                           // unknown trait: dropped
+      var suggestion = (typeof h.suggestion === 'string') ? h.suggestion.toLowerCase() : '';
+      var direction = null;
+      for (var d = 0; d < DIRECTION_WORDS.length; d++) {
+        if (suggestion.indexOf(DIRECTION_WORDS[d]) >= 0) { direction = DIRECTION_WORDS[d]; break; }
+      }
+      for (var j = 0; j < genes.length; j++) map.set(genes[j], direction);
+    }
+    return map;
+  }
+
+  // ─── Helpers: generation 1 ───
+
+  function checkStratification(pop) {
+    var ages = {}, genders = {}, arches = {}, hasEw = false, hasNoEw = false;
+    for (var i = 0; i < pop.length; i++) {
+      var g = pop[i];
+      ages[g.age] = true; genders[g.gender] = true; arches[hairArchetype(g.hairStyle)] = true;
+      if (g.eyewear !== 'none') hasEw = true; else hasNoEw = true;
+    }
+    return AGES.every(function (a) { return ages[a]; })
+      && genders.masc && genders.fem
+      && Object.keys(arches).length >= 3
+      && hasEw && hasNoEw;
+  }
+
+  /* initialPopulation(rand) (spec §3.5): 9 stratified repaired genomes, via bounded
+     rejection sampling over randomGenome(), then a deterministic patch if rejection
+     didn't converge (keeps the function fast and always-terminating). */
+  function initialPopulation(rand) {
+    rand = rand || Math.random;
+    var pop, attempt;
+    for (attempt = 0; attempt < 60; attempt++) {
+      pop = [];
+      for (var i = 0; i < 9; i++) pop.push(randomGenome(rand));
+      if (checkStratification(pop)) return pop;
+    }
+
+    /* deterministic patch: force slots 0-3 across the four ages, 4-5 across the two
+       required genders, 6-8 across the three hair archetypes, then plug any
+       remaining eyewear gap. Every forced gene goes back through repair(). */
+    for (i = 0; i < AGES.length; i++) pop[i] = repair(mergeGene(pop[i], 'age', AGES[i]));
+    pop[4] = repair(mergeGene(pop[4], 'gender', 'masc'));
+    pop[5] = repair(mergeGene(pop[5], 'gender', 'fem'));
+
+    var archOrder = ['short', 'long', 'noneOrHat'];
+    var archFallback = { short: 'bowl', long: 'long', noneOrHat: 'bald' };
+    for (i = 0; i < archOrder.length; i++) {
+      var slot = 6 + i, arch = archOrder[i];
+      var valid = HAIR_VALID[pop[slot].age] || HAIR_VALID.adult;
+      var candidates = valid.filter(function (s) { return hairArchetype(s) === arch; });
+      var style = candidates.length ? candidates[0] : archFallback[arch];
+      pop[slot] = repair(mergeGene(pop[slot], 'hairStyle', style));
+    }
+
+    var hasEw = false, hasNoEw = false;
+    pop.forEach(function (g) { if (g.eyewear !== 'none') hasEw = true; else hasNoEw = true; });
+    if (!hasEw) pop[0] = repair(mergeGene(pop[0], 'eyewear', 'round'));
+    if (!hasNoEw) pop[1] = repair(mergeGene(pop[1], 'eyewear', 'none'));
+
+    return pop;
+  }
+  function mergeGene(genome, key, value) {
+    var out = {};
+    for (var i = 0; i < GENE_NAMES.length; i++) out[GENE_NAMES[i]] = genome[GENE_NAMES[i]];
+    out[key] = value;
+    return out;
   }
 
   // ─── Render: the marker box, resolved lazily so genome.js loads without a DOM ───
@@ -1035,9 +1318,10 @@
     drawFace: drawFace,
     renderGenome: renderGenome,
     genomeHash: genomeHash,
-    mutate: function () { throw new Error('Genome.mutate not implemented yet'); },
-    HINT_MAP: {},
-    initialPopulation: function () { throw new Error('Genome.initialPopulation not implemented yet'); },
+    mutate: mutate,
+    HINT_MAP: HINT_MAP,
+    hintsToGenes: hintsToGenes,
+    initialPopulation: initialPopulation,
     /* the one member outside the namespace contract: shared utilities the dev pages,
        the probes and the Node checks may lean on. Not part of the app's public surface. */
     _internal: {
@@ -1045,6 +1329,9 @@
       HAIR_VALID: HAIR_VALID,
       HAT_STYLES: HAT_STYLES,
       NO_BOW_STYLES: NO_BOW_STYLES,
+      HAIR_LONG: HAIR_LONG,
+      HAIR_SHORT: HAIR_SHORT,
+      hairArchetype: hairArchetype,
       hairTable: hairTable,
       mulberry32: mulberry32Local,
     },
