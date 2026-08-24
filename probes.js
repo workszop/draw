@@ -1,13 +1,13 @@
 /* ============================================================
-   PROBES — dev-harness self-checks for Likeness Evolver.
+   PROBES – dev-harness self-checks for Likeness Evolver.
    Exposes window.Probes = { run() } returning [{name, pass, detail}].
    ============================================================ */
 
-/* ─── Constants ─── */
+// ─── Constants ───
 
-/* ─── Helpers ─── */
+// ─── Helpers ───
 
-/* ─── Run ─── */
+// ─── Run ───
 (function (root) {
   var Probes = {
     run: function () {

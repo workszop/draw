@@ -1,26 +1,26 @@
 /* ============================================================
-   GENOME — the genome domains, RNG, and drawing/rendering logic
+   GENOME – the genome domains, RNG, and drawing/rendering logic
    for Likeness Evolver. Classic script (no modules).
 
    Node-testability: everything except drawFace/renderGenome must
-   run in Node without a DOM — no touching pen/document/window at
+   run in Node without a DOM – no touching pen/document/window at
    load or call time. A local mulberry32-style RNG helper is used
    instead of relying on pen.js's seeded RNG.
    ============================================================ */
 
-/* ─── Constants ─── */
+// ─── Constants ───
 // GENES, domains, and other fixed tables land here task by task.
 
-/* ─── State ─── */
+// ─── State ───
 // No module-level mutable state beyond pure helpers; genomes are plain objects.
 
-/* ─── Helpers ─── */
+// ─── Helpers ───
 // mulberry32-style RNG, randomGenome, repair, mutate, hints, sanitizer, genomeHash.
 
-/* ─── Render ─── */
+// ─── Render ───
 // drawFace, renderGenome (DOM/canvas-touching; guarded so Node-safe code above never calls them at load).
 
-(function (root) {
+(function () {
   var Genome = {
     GENES: {},
     randomGenome: function () { throw new Error('Genome.randomGenome not implemented yet'); },
@@ -39,4 +39,4 @@
   if (typeof window !== 'undefined') {
     window.Genome = Genome;
   }
-})(this);
+})();

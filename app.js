@@ -1,21 +1,21 @@
 /* ============================================================
-   APP — Likeness Evolver UI. Classic script (no modules).
+   APP – Likeness Evolver UI. Classic script (no modules).
    Drives a plain state object; every UI change re-renders from state.
    ============================================================ */
 
-/* ─── Constants ─── */
+// ─── Constants ───
 
-/* ─── State ─── */
+// ─── State ───
 var App = {
   state: {},
 };
 
-/* ─── DOM refs ─── */
+// ─── DOM refs ───
 
-/* ─── Helpers ─── */
+// ─── Helpers ───
 
-/* ─── Render ─── */
+// ─── Render ───
 
-/* ─── Listeners ─── */
+// ─── Listeners ───
 
-/* ─── Init ─── */
+// ─── Init ───
