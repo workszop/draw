@@ -340,15 +340,41 @@
     return choices.length ? pickR(rand, choices) : current;
   }
   /* step an idx gene 1-2 slots toward the hinted end (sign +1 = "darker"/higher index).
-     A null current (uncoloured) starts from the middle of the array before stepping –
-     skin-1..7 run lightest→darkest per style.css, so increasing index is "darker";
-     hair-1..4 / tint-1..4 are stylistic (not a lightness ramp) but follow the same
-     increasing-index-is-"darker" convention for consistency, documented here. */
+     A null current (uncoloured) starts from the middle of the array before stepping.
+     Used for hairFillIdx/hairTintIdx only – hair-1..4 / tint-1..4 are stylistic
+     variation tokens (not a lightness ramp), so "darker" is just a judgment-call
+     convention (increasing raw index = darker), documented here for consistency
+     with skinIdx below. skinIdx itself is NOT raw-index-ordered (see
+     SKIN_DARKNESS_ORDER + stepSkinIdxToward) because the --skin-1..7 tokens are not
+     in luminance order. */
   function stepIdxToward(rand, current, n, sign) {
     var base = (current === null || current === undefined) ? Math.floor((n - 1) / 2) : current;
     var step = riR(rand, 1, 2) * sign;
     var next = base + step;
     return next < 0 ? 0 : next > n - 1 ? n - 1 : next;
+  }
+
+  /* --skin-1..7 (style.css) are NOT in lightest->darkest order by raw index. Measured
+     luminance (0.299R + 0.587G + 0.114B) of the current values:
+       skin-1 #e9c2a6 -> 202.5   skin-2 #dca884 -> 179.4   skin-3 #caa07a -> 168.2
+       skin-4 #b9855e -> 144.1   skin-5 #e6b9b0 -> 197.4   skin-6 #a36d4b -> 121.3
+       skin-7 #7f5236 -> 92.3
+     skin-5 (raw index 4) is nearly as light as skin-1, so a raw-index step from
+     index 3 toward "darker" would land on a visibly lighter tone. SKIN_DARKNESS_ORDER
+     lists raw indices sorted by that luminance, lightest first; stepSkinIdxToward
+     steps 1-2 positions along THIS order, not along the raw index. The gene value
+     stored on the genome stays the raw index (drawing code indexes SKINS directly).
+     Maintenance note: if the --skin-N token values in style.css ever change, this
+     order must be re-derived from their new luminance. */
+  var SKIN_DARKNESS_ORDER = [0, 4, 1, 2, 3, 5, 6];
+  function stepSkinIdxToward(rand, current, sign) {
+    var order = SKIN_DARKNESS_ORDER, n = order.length;
+    var pos = (current === null || current === undefined) ? Math.floor((n - 1) / 2) : order.indexOf(current);
+    if (pos < 0) pos = Math.floor((n - 1) / 2);      // defensive: an out-of-table index falls back to the middle
+    var step = riR(rand, 1, 2) * sign;
+    var nextPos = pos + step;
+    nextPos = nextPos < 0 ? 0 : nextPos > n - 1 ? n - 1 : nextPos;
+    return order[nextPos];
   }
 
   /* mutateOneGene(g, name, direction, rand) – mutates g[name] in place. `direction` is
@@ -366,7 +392,15 @@
         }
         return;
       }
-      case 'skinIdx': case 'hairFillIdx': case 'hairTintIdx': {
+      case 'skinIdx': {
+        if (direction === 'darker' || direction === 'lighter') {
+          g.skinIdx = stepSkinIdxToward(rand, g.skinIdx, direction === 'darker' ? 1 : -1);
+        } else {
+          g.skinIdx = idxNullableOtherR(rand, desc.n, g.skinIdx);
+        }
+        return;
+      }
+      case 'hairFillIdx': case 'hairTintIdx': {
         var n = desc.n;
         if (direction === 'darker' || direction === 'lighter') {
           g[name] = stepIdxToward(rand, g[name], n, direction === 'darker' ? 1 : -1);
@@ -402,6 +436,10 @@
         return;
       }
       case 'stache': case 'beard': {
+        /* "more"/"less" step along STACHES/BEARDS in their declared array order
+           (none < thin < bushy < handlebar < walrus; none < stubble < goatee < full) –
+           a judgment call for "amount of facial hair", same spirit as the skinIdx/
+           hairFillIdx darker/lighter conventions documented above. */
         var domain = name === 'stache' ? STACHES : BEARDS;
         if (direction === 'add') g[name] = pickNonNoneR(rand, domain);
         else if (direction === 'remove') g[name] = 'none';
