@@ -54,8 +54,9 @@
     var Genome = window.Genome;
     var rand = Genome._internal.mulberry32(0xC0FFEE);
     var geneNames = Genome._internal.GENE_NAMES;
-    var DIRS = [null, 'darker', 'lighter', 'older', 'younger', 'longer', 'shorter',
-      'wider', 'narrower', 'rounder', 'add', 'remove', 'more', 'less'];
+    /* every direction word the hint mapper can produce, straight off the source list so
+       a new one (Phase 9 added bigger/smaller/closer) is exercised here automatically */
+    var DIRS = [null].concat(Genome._internal.DIRECTION_WORDS);
     var total = 500, fails = 0, missingKeys = 0, examples = [];
     for (var i = 0; i < total; i++) {
       var base = Genome.randomGenome(rand);

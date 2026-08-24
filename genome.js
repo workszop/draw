@@ -36,6 +36,19 @@
   var BEARDS = ['none', 'stubble', 'goatee', 'full'];
   var EYEWEARS = ['none', 'round', 'square', 'shades', 'halfmoon', 'pince', 'monocle', 'cateye'];
   var EARRINGS = ['none', 'stud', 'hoop', 'drop'];
+  /* Phase 9 (spec §12): identity-relevant portrait genes. faceShape drives the jaw
+     scaling of the head blob; long/round faces stay mostly expressed through
+     headRatio, which is deliberately left independent of this gene. */
+  var FACE_SHAPES = ['oval', 'round', 'long', 'heart', 'square'];
+  var EAR_STYLES = ['flat', 'out'];
+  /* jaw width multiplier per face shape, applied to the head blob below the eye line */
+  var JAW_K = { oval: 0.95, round: 1.0, long: 1.0, heart: 0.80, square: 1.08 };
+  /* ranges for the Phase 9 float genes, one place so GENES/repair/mutate agree */
+  var EAR_SIZE_RANGE = [0.8, 1.35];
+  var NOSE_SIZE_RANGE = [0.7, 1.4];
+  var MOUTH_SIZE_RANGE = [0.7, 1.3];
+  var EYE_SIZE_RANGE = [0.75, 1.3];
+  var EYE_GAP_RANGE = [0.85, 1.15];
 
   /* the hair table from faces.js, parameterised by age and the soft/rough weights.
      Validity per age = every style with weight > 0 when both weights are 1. */
@@ -101,11 +114,18 @@
     headW:       { type: 'num', range: function (age) { return headWRange(age); } },
     headRatio:   { type: 'num', range: function (age) { return headRatioRange(age); } },
     tilt:        { type: 'num', range: function () { return [-0.09, 0.09]; } },
+    faceShape:   { type: 'cat', values: FACE_SHAPES },
     look:        { type: 'cat', values: LOOKS, ordered: true },
     eyeKind:     { type: 'cat', values: EYE_KINDS },
+    eyeSize:     { type: 'num', range: function () { return EYE_SIZE_RANGE; }, ordered: true },
+    eyeGap:      { type: 'num', range: function () { return EYE_GAP_RANGE; }, ordered: true },
     browKind:    { type: 'cat', values: BROW_KINDS, ordered: true },
     noseKind:    { type: 'cat', values: NOSE_KINDS },
+    noseSize:    { type: 'num', range: function () { return NOSE_SIZE_RANGE; }, ordered: true },
     mouthKind:   { type: 'cat', values: MOUTH_KINDS },
+    mouthSize:   { type: 'num', range: function () { return MOUTH_SIZE_RANGE; }, ordered: true },
+    earStyle:    { type: 'cat', values: EAR_STYLES },
+    earSize:     { type: 'num', range: function () { return EAR_SIZE_RANGE; }, ordered: true },
     stache:      { type: 'cat', values: STACHES },
     beard:       { type: 'cat', values: BEARDS },
     eyewear:     { type: 'cat', values: EYEWEARS },
@@ -186,6 +206,8 @@
     if (!inList(g.beard, BEARDS)) g.beard = pickR(rand, BEARDS);
     if (!inList(g.eyewear, EYEWEARS)) g.eyewear = pickR(rand, EYEWEARS);
     if (!inList(g.earrings, EARRINGS)) g.earrings = pickR(rand, EARRINGS);
+    if (!inList(g.faceShape, FACE_SHAPES)) g.faceShape = pickR(rand, FACE_SHAPES);
+    if (!inList(g.earStyle, EAR_STYLES)) g.earStyle = pickR(rand, EAR_STYLES);
     g.hairDark = !!g.hairDark;
     g.bow = !!g.bow;
 
@@ -228,6 +250,15 @@
     g.tilt = clampNum(g.tilt, -0.09, 0.09, 0);
     g.look = snapTo(clampNum(g.look, -1, 1, 0), LOOKS);
 
+    /* Phase 9 float genes: pure range clamps, no cross-gene rules – so a forced
+       change to any of them always survives repair() (makeDifferentMutant relies
+       on that; see the stage-3 note there). Fallback = middle of the range. */
+    g.earSize = clampNum(g.earSize, EAR_SIZE_RANGE[0], EAR_SIZE_RANGE[1], (EAR_SIZE_RANGE[0] + EAR_SIZE_RANGE[1]) / 2);
+    g.noseSize = clampNum(g.noseSize, NOSE_SIZE_RANGE[0], NOSE_SIZE_RANGE[1], (NOSE_SIZE_RANGE[0] + NOSE_SIZE_RANGE[1]) / 2);
+    g.mouthSize = clampNum(g.mouthSize, MOUTH_SIZE_RANGE[0], MOUTH_SIZE_RANGE[1], (MOUTH_SIZE_RANGE[0] + MOUTH_SIZE_RANGE[1]) / 2);
+    g.eyeSize = clampNum(g.eyeSize, EYE_SIZE_RANGE[0], EYE_SIZE_RANGE[1], (EYE_SIZE_RANGE[0] + EYE_SIZE_RANGE[1]) / 2);
+    g.eyeGap = clampNum(g.eyeGap, EYE_GAP_RANGE[0], EYE_GAP_RANGE[1], (EYE_GAP_RANGE[0] + EYE_GAP_RANGE[1]) / 2);
+
     return g;
   }
 
@@ -269,11 +300,21 @@
       headW: rfR(rand, headWRange(age)[0], headWRange(age)[1]),
       headRatio: isChild ? rfR(rand, 0.92, 1.1) : rfR(rand, 1.0, 1.3),
       tilt: rfR(rand, -0.09, 0.09),
+      /* lightly weighted toward the two commonest silhouettes so a random sheet
+         still reads as a crowd of faces rather than a shape sampler */
+      faceShape: wpickR(rand, { oval: 3, round: 2.2, long: 1.2, heart: 1.1, square: 1.1 }),
       look: pickR(rand, [-1, -0.5, 0, 0, 0.5, 1]),
       eyeKind: wpickR(rand, { ring: 3, big: isChild ? 3 : 1, dot: isOld ? 2 : 1, mix: 0.6 }),
+      eyeSize: rfR(rand, EYE_SIZE_RANGE[0], EYE_SIZE_RANGE[1]),
+      eyeGap: rfR(rand, EYE_GAP_RANGE[0], EYE_GAP_RANGE[1]),
       browKind: wpickR(rand, { none: isChild ? 2 : 1.2, arc: 3, thick: 0.4 + 2.2 * rough }),
       noseKind: wpickR(rand, { hook: 3, button: isChild ? 3 : 0.3 + 1.5 * soft, straight: 1, big: isOld ? 1.5 * rough : 0 }),
+      noseSize: rfR(rand, NOSE_SIZE_RANGE[0], NOSE_SIZE_RANGE[1]),
       mouthKind: wpickR(rand, { flat: 2, smile: 1.5, lips: 1, open: 0.7, frown: 0.7, pout: 1.2 * soft, grin: isChild ? 1 : 0.4 }),
+      mouthSize: rfR(rand, MOUTH_SIZE_RANGE[0], MOUTH_SIZE_RANGE[1]),
+      /* 55/45 out/flat – the same odds the drawing used to roll for itself */
+      earStyle: chanceR(rand, 0.55) ? 'out' : 'flat',
+      earSize: rfR(rand, EAR_SIZE_RANGE[0], EAR_SIZE_RANGE[1]),
       stache: (!isChild && chanceR(rand, 0.45 * rough))
         ? wpickR(rand, { thin: 1, bushy: 1, handlebar: 0.6, walrus: isOld ? 1 : 0.2 }) : 'none',
       beard: (!isChild && chanceR(rand, 0.4 * rough))
@@ -429,6 +470,21 @@
         else { var rr = desc.range(g.age); g.headRatio = rfR(rand, rr[0], rr[1]); }
         return;
       }
+      case 'earSize': case 'noseSize': case 'mouthSize': case 'eyeSize': {
+        /* Phase 9 size genes: "bigger"/"smaller" step ±12% (repair clamps back into
+           range at the ends), any other direction – or none – re-rolls in range. */
+        if (direction === 'bigger') g[name] = g[name] * 1.12;
+        else if (direction === 'smaller') g[name] = g[name] * 0.88;
+        else { var rs = desc.range(g.age); g[name] = rfR(rand, rs[0], rs[1]); }
+        return;
+      }
+      case 'eyeGap': {
+        /* "wider" pushes the eyes apart, "closer"/"narrower" pulls them together */
+        if (direction === 'wider') g.eyeGap = g.eyeGap * 1.10;
+        else if (direction === 'closer' || direction === 'narrower') g.eyeGap = g.eyeGap * 0.90;
+        else { var rge = desc.range(g.age); g.eyeGap = rfR(rand, rge[0], rge[1]); }
+        return;
+      }
       case 'eyewear': {
         if (direction === 'add') g.eyewear = pickNonNoneR(rand, EYEWEARS);
         else if (direction === 'remove') g.eyewear = 'none';
@@ -519,19 +575,25 @@
     hair_length: ['hairStyle'],
     hair_color: ['hairDark', 'hairFillIdx', 'hairTintIdx'],
     skin_tone: ['skinIdx'],
-    face_shape: ['headW', 'headRatio'],
+    face_shape: ['headW', 'headRatio', 'faceShape'],
     glasses: ['eyewear'],
     facial_hair: ['stache', 'beard'],
-    eyes: ['eyeKind'],
+    eyes: ['eyeKind', 'eyeSize', 'eyeGap'],
     eyebrows: ['browKind'],
-    nose: ['noseKind'],
-    mouth: ['mouthKind'],
+    nose: ['noseKind', 'noseSize'],
+    mouth: ['mouthKind', 'mouthSize'],
+    ears: ['earStyle', 'earSize'],
     gaze: ['look'],
     accessories: ['bow', 'earrings', 'hatWashIdx'],
   };
 
+  /* hintsToGenes scans this list IN ORDER and takes the first word it finds in the
+     suggestion, so the order is part of the contract. The Phase 9 words are appended
+     rather than inserted, which keeps every pre-Phase-9 suggestion mapping exactly as
+     it did before (e.g. "more, bigger hair" still resolves to "more"). */
   var DIRECTION_WORDS = ['darker', 'lighter', 'older', 'younger', 'longer', 'shorter',
-    'wider', 'narrower', 'rounder', 'add', 'remove', 'more', 'less'];
+    'wider', 'narrower', 'rounder', 'add', 'remove', 'more', 'less',
+    'bigger', 'smaller', 'closer'];
 
   /* hintsToGenes(hints) -> Map(geneName -> direction|null). `hints` is expected to be
      an array of {trait, suggestion} (spec §4.1); tolerant of garbage – a non-array
@@ -713,10 +775,17 @@
           bool-flip/etc.), so this succeeds even when stage 1 kept rolling no-ops.
           Prefers a hinted gene (the AI's suggested direction) so a forced change still
           reads as a "reasonable" mutation; falls back to a random non-wobbleSeed gene.
-       3. defensive only, for the one gene (hairStyle) whose forced change can still be
-          repair()-ed back to the original value: walk every remaining non-wobbleSeed
-          gene name once, forcing each in turn, until one sticks. Bounded at
-          GENE_NAMES.length iterations, so even this worst case always terminates. */
+       3. defensive only, for the genes whose forced change can still be repair()-ed
+          back to the original value. repair() has several cross-gene rules that can
+          undo a single forced change – hairStyle (re-picked when invalid for the age),
+          stache/beard (forced to 'none' on a child), noseKind ('big' only on an old
+          face), bow (needs hair to sit in and a child/soft persona), earrings (silent
+          on a masc persona) – so this stage walks every remaining non-wobbleSeed gene
+          name once, forcing each in turn, until one sticks. It starts at GENE_NAMES[0]
+          ('age'), which repair() never reverts, and the Phase 9 genes it reaches later
+          are pure range clamps with no cross-gene rules, so a change to any of those
+          survives repair() too. Bounded at GENE_NAMES.length iterations, so even this
+          worst case always terminates. */
   function makeDifferentMutant(winner, generation, hintedGenes, rand) {
     var m;
     for (var attempt = 0; attempt < MUTANT_RETRY_ATTEMPTS; attempt++) {
@@ -806,6 +875,26 @@
   }
 
   // ─── Render: one face (adapted from faces.js, decisions lifted into the genome) ───
+
+  /* helper: faceShape (Phase 9). Narrows or widens the jaw by scaling the x-offset of
+     the head blob's points BELOW cy toward JAW_K for that shape. The scale ramps in
+     linearly with depth below cy (full jawK at the chin, 1.0 at the eye line) instead
+     of switching on at cy: a hard switch would put a visible notch in the silhouette
+     right at its widest point, where the blob has a point on either side of cy.
+     Only the head outline (and the clip path derived from it) changes – hair, hats and
+     ears are anchored to rx/ry, so they keep their proportions on every face shape. */
+  function shapeJaw(pts, cx, cy, ry, faceShape) {
+    var jawK = JAW_K[faceShape];
+    if (jawK === undefined || jawK === 1) return pts;
+    var out = [];
+    for (var i = 0; i < pts.length; i++) {
+      var x = pts[i][0], y = pts[i][1];
+      var t = (y - cy) / ry;                     // 0 at the eye line, 1 at the chin
+      t = t < 0 ? 0 : t > 1 ? 1 : t;
+      out.push([cx + (x - cx) * (1 + (jawK - 1) * t), y]);
+    }
+    return out;
+  }
 
   /* helper: clip everything that follows to the inside of the head */
   function clipHead(F, fn) {
@@ -1127,14 +1216,14 @@
     var cx = F.cx, cy = F.cy, isChild = F.isChild, look = F.look, rx = F.rx, ry = F.ry,
       shift = F.shift, skinWash = F.skinWash, style = F.style;
     var earY = cy + ry * rf(-0.05, 0.12);
-    var earR = isChild ? rf(6, 9) : rf(6, 11);
+    var earR = (isChild ? rf(6, 9) : rf(6, 11)) * F.earSize;   // earSize gene
     var hideEars = ['long', 'bob', 'afro', 'headscarf'].indexOf(style) >= 0 && chance(0.85);
     /* the ear on the side the face turns toward slips out of view */
     var leftEar = !hideEars && look >= -0.5 && (look < 0.5 || chance(0.8));
     var rightEar = !hideEars && look <= 0.5 && (look > -0.5 || chance(0.8));
     /* two kinds of ear: the quick "C" on the cheek, or a real ear sticking
        out of the head's silhouette (paper-filled, washed like the skin) */
-    var earOut = !hideEars && chance(0.55);
+    var earOut = !hideEars && F.earStyle === 'out';   // earStyle gene (hiding stays style-driven)
     var earPos = {};                            // where each ear ends up, for the earrings
     [[leftEar, -1], [rightEar, 1]].forEach(function (pair) {
       var on = pair[0], s = pair[1];
@@ -1142,7 +1231,11 @@
       if (earOut) {
         var r = earR * 1.25;
         /* the head's edge at ear height, then the ear hangs off it */
-        var edgeX = cx + s * rx * Math.sqrt(Math.max(0.2, 1 - Math.pow((earY - cy) / ry, 2))) + shift * 0.25;
+        /* the same jaw ramp shapeJaw() applied to the head blob, so an out-ear stays
+           glued to the silhouette on a narrowed (heart) or widened (square) jaw */
+        var jawT = Math.min(1, Math.max(0, (earY - cy) / ry));
+        var jawScale = 1 + ((JAW_K[F.faceShape] === undefined ? 1 : JAW_K[F.faceShape]) - 1) * jawT;
+        var edgeX = cx + s * rx * jawScale * Math.sqrt(Math.max(0.2, 1 - Math.pow((earY - cy) / ry, 2))) + shift * 0.25;
         var ex = edgeX + s * r * 0.55;
         var ear = blobPts(ex, earY, r * 0.75, r * 1.05, 0.1, 10);
         sketch(ear, { closed: true, fill: true, fillColor: pen.base, wash: skinWash && Object.assign({}, skinWash, { grow: 1, dx: s * 2, dy: 1, mode: 'flat' }), width: rf(1.8, 2.4), wob: 0.9 });
@@ -1179,16 +1272,17 @@
     if (expr === 'sly') eyeKind = 'wink';
     if (isOld && eyeKind === 'big') eyeKind = 'ring';
     var lashes = chance(0.85 * soft);
+    var eyeSize = F.eyeSize;                     // gene: scales every eye radius below
 
     function eye(x, kind, s, side) {
-      if (kind === 'dot') { dot(x, eyeY, rf(2, 3.2) * (isChild ? 1.3 : 1)); return; }
-      if (kind === 'wink') { arc(x, eyeY, rf(5, 8), 0.15, Math.PI - 0.15, { width: 2 }); return; }
+      if (kind === 'dot') { dot(x, eyeY, rf(2, 3.2) * (isChild ? 1.3 : 1) * eyeSize); return; }
+      if (kind === 'wink') { arc(x, eyeY, rf(5, 8) * eyeSize, 0.15, Math.PI - 0.15, { width: 2 }); return; }
       var r;
       if (kind === 'closed') {
-        r = rf(5, 8);
+        r = rf(5, 8) * eyeSize;
         arc(x, eyeY, r, Math.PI + 0.15, Math.PI * 2 - 0.15, { width: 2 });
       } else {
-        r = (kind === 'big' ? rf(10, 16) : rf(5.5, 9)) * s * (isOld ? 0.85 : 1);
+        r = (kind === 'big' ? rf(10, 16) : rf(5.5, 9)) * s * (isOld ? 0.85 : 1) * eyeSize;
         arc(x, eyeY, r, 0, Math.PI * 2, { width: 1.8, wob: 0.9 });
         var px = x + look * r * 0.35 + rf(-1, 1), py = eyeY + rf(-1, 2);
         dot(px, py, Math.max(1.6, r * (isChild ? rf(0.35, 0.5) : rf(0.22, 0.4))));
@@ -1238,7 +1332,7 @@
     var cx = F.cx, eyeY = F.eyeY, isChild = F.isChild, look = F.look, ry = F.ry, shift = F.shift;
     var noseKind = F.noseKind;                   // gene (repair keeps 'big' for old faces only)
     var nx = cx + shift * 1.4, nTop = eyeY + rf(2, 8);
-    var nLen = ry * (isChild ? rf(0.14, 0.24) : rf(0.22, 0.4)) * (noseKind === 'big' ? 1.2 : 1);
+    var nLen = ry * (isChild ? rf(0.14, 0.24) : rf(0.22, 0.4)) * (noseKind === 'big' ? 1.2 : 1) * F.noseSize;   // noseSize gene
     var hookDir = pick([-1, 1]);
     var hook = hookDir * rf(4, 12) * (noseKind === 'big' ? 1.5 : 1) + look * 6;
     if (noseKind === 'button') {
@@ -1261,7 +1355,7 @@
       nTop = F.nTop, rx = F.rx, ry = F.ry, shift = F.shift, soft = F.soft;
     var mY = nTop + nLen + rf(12, 20) * (isChild ? 0.85 : 1);
     var mx = cx + shift;
-    var mS = isChild ? 0.75 : 1;                 // mouth scale
+    var mS = (isChild ? 0.75 : 1) * F.mouthSize;   // mouth scale, mouthSize gene on top
     var mouthKind = F.mouthKind;                 // gene; the expr ladder still applies on top
     if (expr === 'happy') mouthKind = chance(0.7) ? 'smile' : 'grin';
     if (expr === 'surprised') mouthKind = 'open';
@@ -1294,9 +1388,9 @@
       sketch([[mx - 8 * mS, mY + 2], [mx, mY + rf(4, 6)], [mx + 8 * mS, mY + 2]], { width: 1.8, wob: 0.8 });
     } else if (mouthKind === 'pout') {
       var lipRed = chance(0.6);
-      sketch([[mx - 9, mY], [mx - 4, mY - 3], [mx, mY - 1], [mx + 4, mY - 3], [mx + 9, mY], [mx, mY + 5]],
+      sketch([[mx - 9 * mS, mY], [mx - 4 * mS, mY - 3], [mx, mY - 1], [mx + 4 * mS, mY - 3], [mx + 9 * mS, mY], [mx, mY + 5]],
         { closed: true, fill: !lipRed, wash: lipRed ? { color: C().ACCENTS[0], alpha: 0.9, grow: 1.2, dx: rf(-2, 2), dy: rf(-1, 1) } : null, width: 1.6, wob: 0.7 });
-      line(mx - 7, mY + 0.5, mx + 7, mY + 0.5, { width: 1, wob: 0.4, color: pen.base });
+      line(mx - 7 * mS, mY + 0.5, mx + 7 * mS, mY + 0.5, { width: 1, wob: 0.4, color: pen.base });
     } else if (mouthKind === 'smile') {
       arc(mx, mY - 2, rf(8, 14) * mS, 0.25, Math.PI - 0.25, { width: 2 });
     } else if (mouthKind === 'grin') {
@@ -1453,7 +1547,7 @@
     var shift = look * rx * 0.18;                // features slide toward gaze
     var hairTop = cy - ry * (isOld && masc ? rf(0.45, 0.7) : isChild ? rf(0.3, 0.5) : rf(0.25, 0.45));
     var eyeY = cy - ry * (isChild ? rf(-0.08, 0.04) : rf(0.02, 0.14));   // children carry their eyes lower
-    var gap = rx * (isChild ? rf(0.4, 0.52) : rf(0.34, 0.5));
+    var gap = rx * (isChild ? rf(0.4, 0.52) : rf(0.34, 0.5)) * g.eyeGap;   // eyeGap gene: eyes apart/together
     var exL = cx - gap + shift, exR = cx + gap + shift;
     var partDir = pick([-1, 1]);
     var style = g.hairStyle;
@@ -1463,7 +1557,7 @@
     pen.ctx.rotate(tilt);
     pen.ctx.translate(-cx, -cy);
 
-    var head = blobPts(cx, cy, rx, ry, rf(0.04, 0.09));
+    var head = shapeJaw(blobPts(cx, cy, rx, ry, rf(0.04, 0.09)), cx, cy, ry, g.faceShape);
 
     /* hairlines: yAt(t) gives the hair's edge on the forehead for t in [-1,1] across the head */
     var bangsY = eyeY - rf(16, 24);
@@ -1482,6 +1576,9 @@
       /* the part-level genes the drawing used to roll for itself */
       eyeKind: g.eyeKind, browKind: g.browKind, noseKind: g.noseKind, mouthKind: g.mouthKind,
       stache: g.stache, beard: g.beard, eyewear: g.eyewear, earrings: g.earrings,
+      /* Phase 9 genes (spec §12); faceShape is already baked into `head` above */
+      faceShape: g.faceShape, earStyle: g.earStyle, earSize: g.earSize,
+      noseSize: g.noseSize, mouthSize: g.mouthSize, eyeSize: g.eyeSize,
     };
     faceBackHair(F);
     faceHead(F);
@@ -1540,6 +1637,7 @@
        the probes and the Node checks may lean on. Not part of the app's public surface. */
     _internal: {
       GENE_NAMES: GENE_NAMES,
+      DIRECTION_WORDS: DIRECTION_WORDS,
       HAIR_VALID: HAIR_VALID,
       HAT_STYLES: HAT_STYLES,
       NO_BOW_STYLES: NO_BOW_STYLES,
