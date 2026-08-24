@@ -151,8 +151,9 @@
   }
 
   /* probe 5 (§7.4, §4.3): sanitizeJudgeReply() fixtures – valid reply; garbage text;
-     out-of-range best; unknown traits mixed with known; JSON embedded in prose. Each
-     fixture's actual result is compared to its expected result by JSON.stringify. */
+     out-of-range best; unknown traits mixed with known; JSON embedded in prose; a
+     brace inside a quoted suggestion string; more than 4 hints. Each fixture's actual
+     result is compared to its expected result by JSON.stringify. */
   function sanitizerFixtures() {
     var sanitize = window.Genome.sanitizeJudgeReply;
     var fixtures = [
@@ -182,6 +183,29 @@
         text: 'Sure! Here is my answer: {"best": 7, "hints": [{"trait":"glasses","suggestion":"add"}]} Hope that helps.',
         expected: { best: 7, hints: [{ trait: 'glasses', suggestion: 'add' }] },
       },
+      {
+        name: 'brace inside a quoted suggestion string',
+        text: '{"best": 6, "hints": [{"trait":"mouth","suggestion":"smile :}"}]}',
+        expected: { best: 6, hints: [{ trait: 'mouth', suggestion: 'smile :}' }] },
+      },
+      {
+        name: 'more than 4 hints gets capped at 4',
+        text: '{"best": 2, "hints": [' +
+          '{"trait":"age","suggestion":"older"},' +
+          '{"trait":"gender","suggestion":"x"},' +
+          '{"trait":"expression","suggestion":"x"},' +
+          '{"trait":"hair_style","suggestion":"x"},' +
+          '{"trait":"hair_length","suggestion":"x"}]}',
+        expected: {
+          best: 2,
+          hints: [
+            { trait: 'age', suggestion: 'older' },
+            { trait: 'gender', suggestion: 'x' },
+            { trait: 'expression', suggestion: 'x' },
+            { trait: 'hair_style', suggestion: 'x' },
+          ],
+        },
+      },
     ];
     var fails = [];
     for (var i = 0; i < fixtures.length; i++) {
@@ -205,7 +229,7 @@
     { name: 'repair validity: 500 mutations all repair-idempotent', fn: repairValidity },
     { name: 'stratification: 50 initialPopulation() calls satisfy §3.5', fn: stratification },
     { name: 'elitism: cell 1 hash equals previous winner across 3 generations', fn: elitism },
-    { name: 'sanitizer: 5 fixture replies parse to expected results', fn: sanitizerFixtures },
+    { name: 'sanitizer: 7 fixture replies parse to expected results', fn: sanitizerFixtures },
   ];
 
   var Probes = {

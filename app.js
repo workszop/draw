@@ -100,6 +100,15 @@ var reviewRemainingMs = null;  // ms left when Pause froze a running timer, or n
    and is explicitly cleared by finishRun() so Stop can never let a stale retry fire. */
 var judgeRetryTimerId = null;
 
+/* judgeEpoch – bumped every time judging begins for a (new or advanced) generation.
+   A judge Promise/retry captures the epoch it was fired under; if judgeEpoch has moved
+   on by the time it settles (Stop, New photo, Start-over, or a later generation already
+   under way) the callback drops its result instead of writing a stale winner/hints into
+   a run it no longer belongs to. The phase === 'judging' check alone isn't enough: Stop
+   followed by a fresh Start also re-enters phase 'judging', which an epoch-less guard
+   would let a straggling promise from the OLD run sail right through. */
+var judgeEpoch = 0;
+
 // ─── DOM refs ───
 
 var appEl = document.getElementById('app');
@@ -430,32 +439,47 @@ function clearJudgeRetryTimer() {
 // ─── Helpers: GA loop ───
 
 /* beginJudging() – enters phase 'judging' for the population already in state and
-   fires the first judge attempt. Called right after Start builds generation 1, and
-   again by advanceGeneration() after building each following generation. */
+   fires the first judge attempt under a freshly bumped judgeEpoch. Called right after
+   Start builds generation 1, and again by advanceGeneration() after building each
+   following generation. */
 function beginJudging() {
+  judgeEpoch++;
+  var epoch = judgeEpoch;
   App.set({ phase: 'judging', runError: null });
-  runJudge(0);
+  runJudge(0, epoch);
 }
 
-/* runJudge(attempt) – calls the configured provider's adapter, sanitizes the reply,
-   and on success sets the AI's pick (source 'ai') with its hints, then starts the
-   review timer. attempt is 0 for the first try, 1 for the single retry (spec §6).
-   Every branch re-checks App.state.phase === 'judging' before touching state, so a
-   Stop/Pause/New-photo that raced ahead of a slow network response is a silent no-op
-   instead of clobbering whatever the user already moved on to. */
-function runJudge(attempt) {
+/* runJudge(attempt, epoch) – calls the configured provider's adapter, sanitizes the
+   reply, and on success sets the AI's pick (source 'ai') with its hints, then starts
+   the review timer. attempt is 0 for the first try, 1 for the single retry (spec §6).
+   epoch is the judgeEpoch captured when this attempt's generation started judging.
+   Every branch re-checks BOTH epoch === judgeEpoch and App.state.phase === 'judging'
+   before touching state: the phase check alone isn't enough because Stop followed by
+   a fresh Start re-enters phase 'judging' too, which would let a straggling promise
+   from the OLD run sail through and hijack the new one; the epoch check closes that
+   gap. Building the grid is wrapped in try/catch so a canvas failure routes through
+   handleJudgeFailure like any other judge error instead of stranding the run in
+   'judging' forever. */
+function runJudge(attempt, epoch) {
   var s = App.state;
   var provider = s.provider;
   var model = s.models[provider];
   var key = s.keys[provider];
-  var gridJpeg = buildGridJpeg(s.population);
   var photoJpeg = s.photo.jpegDataUrl;
 
+  var gridJpeg;
+  try {
+    gridJpeg = buildGridJpeg(s.population);
+  } catch (err) {
+    handleJudgeFailure(attempt, epoch, (err && err.message) ? err.message : 'Could not build the comparison grid.');
+    return;
+  }
+
   judge(provider, model, key, photoJpeg, gridJpeg).then(function (text) {
-    if (App.state.phase !== 'judging') return; // raced by Stop/Pause/reset – drop it
+    if (epoch !== judgeEpoch || App.state.phase !== 'judging') return; // stale – a newer run/generation moved on
     var parsed = window.Genome.sanitizeJudgeReply(text);
     if (!parsed) {
-      handleJudgeFailure(attempt, 'The judge reply could not be understood.');
+      handleJudgeFailure(attempt, epoch, 'The judge reply could not be understood.');
       return;
     }
     App.set({
@@ -467,22 +491,25 @@ function runJudge(attempt) {
     });
     startReviewTimer();
   }).catch(function (err) {
-    if (App.state.phase !== 'judging') return; // raced by Stop/Pause/reset – drop it
-    handleJudgeFailure(attempt, (err && err.message) ? err.message : 'The judge request failed.');
+    if (epoch !== judgeEpoch || App.state.phase !== 'judging') return; // stale – a newer run/generation moved on
+    handleJudgeFailure(attempt, epoch, (err && err.message) ? err.message : 'The judge request failed.');
   });
 }
 
-/* handleJudgeFailure(attempt, message) (spec §6): attempt 0 schedules the single
-   retry after JUDGE_RETRY_MS; attempt 1 (the retry itself failed too) enters
-   'paused' with the message so the run keeps going manually. */
-function handleJudgeFailure(attempt, message) {
+/* handleJudgeFailure(attempt, epoch, message) (spec §6): attempt 0 schedules the
+   single retry after JUDGE_RETRY_MS; attempt 1 (the retry itself failed too) enters
+   'paused' with the message so the run keeps going manually. Both branches re-check
+   epoch === judgeEpoch before acting, so a retry whose run was stopped/restarted in
+   the meantime is a silent no-op. */
+function handleJudgeFailure(attempt, epoch, message) {
   if (attempt === 0) {
     judgeRetryTimerId = window.setTimeout(function () {
       judgeRetryTimerId = null;
-      if (App.state.phase === 'judging') runJudge(1);
+      if (epoch === judgeEpoch && App.state.phase === 'judging') runJudge(1, epoch);
     }, JUDGE_RETRY_MS);
     return;
   }
+  if (epoch !== judgeEpoch) return; // stale – the run this retry belonged to has already moved on
   App.set({ phase: 'paused', runError: message + ' Pick manually to continue.' });
 }
 
@@ -527,6 +554,7 @@ function buildComposite(photo, portraitCanvas, callback) {
 function finishRun(winnerIndex, entry) {
   clearReviewTimer();
   clearJudgeRetryTimer(); // a judge retry must never fire after the run has already ended
+  judgeEpoch++; // invalidate any judge Promise still in flight (Stop mid-'judging')
   var s = App.state;
   var genome = s.population[winnerIndex - 1];
   var portraitCanvas = buildPortraitCanvas(genome);
@@ -955,8 +983,14 @@ function onCellPick(index) {
   if (s.state !== 'running' || (s.phase !== 'reviewing' && s.phase !== 'paused')) return;
   if (!s.population || index < 1 || index > s.population.length) return;
   // overriding a pick keeps whatever hints the AI already produced this generation –
-  // only the winner + its source change, winnerHints is left untouched
-  App.set({ winner: index, winnerSource: 'manual' });
+  // only the winner + its source change, winnerHints is left untouched. A pick made
+  // while paused (spec §6 manual-continue) also clears the judge-failure message,
+  // since the user has now done exactly what it asked for.
+  App.set({
+    winner: index,
+    winnerSource: 'manual',
+    runError: s.phase === 'paused' ? null : s.runError,
+  });
   if (s.phase === 'reviewing') startReviewTimer(); // (re)start the full REVIEW_MS window on every pick, including overrides
 }
 
@@ -965,6 +999,7 @@ function onStartOverClick() {
   // then run the exact Start path so gen 1 gets a brand-new initialPopulation()
   clearReviewTimer();
   clearJudgeRetryTimer();
+  judgeEpoch++; // invalidate any judge Promise still in flight
   reviewRemainingMs = null;
   App.set({
     state: 'ready', phase: null, population: null, generation: 0,
@@ -977,6 +1012,7 @@ function onStartOverClick() {
 function onNewPhotoClick() {
   clearReviewTimer();
   clearJudgeRetryTimer();
+  judgeEpoch++; // invalidate any judge Promise still in flight
   reviewRemainingMs = null;
   App.set({
     state: 'idle', phase: null, population: null, generation: 0,

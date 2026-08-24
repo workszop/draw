@@ -558,18 +558,29 @@
   // ─── Helpers: judge reply sanitizer (spec §4.3, Task 6) ───
 
   var MAX_HINT_SUGGESTION_CHARS = 80;
+  var MAX_SANITIZED_HINTS = 4;      // matches the prompt's "at most 4 hints" contract (spec §4.1)
 
   /* extractFirstJsonObject(text) -> the substring of the first balanced {...} block,
      or null if text isn't a string or has no balanced brace pair. A balanced-brace
      scan (not a greedy regex) so a reply like `{"a":{"b":1}} trailing junk` still
-     extracts exactly the outer object and stops at its matching close brace. */
+     extracts exactly the outer object and stops at its matching close brace. The scan
+     is string-aware (tracks JSON string spans and their \ escapes) so a stray brace
+     inside a quoted suggestion – e.g. a suggestion value like `smile :}` – can never
+     be mistaken for real object structure and reject an otherwise-valid reply. */
   function extractFirstJsonObject(text) {
     if (typeof text !== 'string') return null;
     var start = text.indexOf('{');
     while (start !== -1) {
-      var depth = 0;
+      var depth = 0, inString = false, escaped = false;
       for (var i = start; i < text.length; i++) {
         var ch = text.charAt(i);
+        if (inString) {
+          if (escaped) escaped = false;
+          else if (ch === '\\') escaped = true;
+          else if (ch === '"') inString = false;
+          continue;
+        }
+        if (ch === '"') { inString = true; continue; }
         if (ch === '{') depth++;
         else if (ch === '}') {
           depth--;
@@ -584,9 +595,11 @@
   /* sanitizeJudgeReply(text) (spec §4.3) -> { best, hints } | null. Pure, Node-testable,
      exposed on the Genome namespace (not just app.js) so probes and Node tests reach it
      without a DOM. `best` must be an integer 1-9 or the WHOLE reply is rejected (null).
-     `hints` is filtered to the known HINT_MAP trait vocabulary, and every suggestion is
-     coerced to a string and truncated to 80 chars. Never eval's anything; callers must
-     still render hints via textContent only, never innerHTML. */
+     `hints` is filtered to the known HINT_MAP trait vocabulary, every suggestion is
+     coerced to a string and truncated to 80 chars, and the list itself is capped at
+     MAX_SANITIZED_HINTS (4), matching the prompt's "at most 4 hints" contract. Never
+     eval's anything; callers must still render hints via textContent only, never
+     innerHTML. */
   function sanitizeJudgeReply(text) {
     var block = extractFirstJsonObject(text);
     if (!block) return null;
@@ -613,7 +626,7 @@
       }
     }
 
-    return { best: best, hints: hints };
+    return { best: best, hints: hints.slice(0, MAX_SANITIZED_HINTS) };
   }
 
   // ─── Helpers: generation 1 ───
