@@ -5,7 +5,12 @@
    The full GA run loop (judging, elitism, mutation wiring) lands in Task 5;
    Pause/Resume/Stop here are minimal placeholders so the state machine and
    DOM contract are exercisable before that loop exists.
+
+   Wrapped in an IIFE so the 25+ helper/constant names below stay private;
+   only window.App is meant to escape this scope.
    ============================================================ */
+(function () {
+  'use strict';
 
 // ─── Constants ───
 
@@ -421,4 +426,10 @@ function onCellPick(index) {
   }
 
   render();
+})();
+
+// ─── Namespace ───
+
+window.App = App; // the one intentional escape from this IIFE's scope
+
 })();
