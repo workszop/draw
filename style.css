@@ -122,6 +122,11 @@ body.edu { background: var(--paper); color: var(--ink); font-family: var(--font-
 }
 .edu-header .right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
 
+/* header-controls (Task 9): Start/Pause/Stop + the "Gen g/10" progress bar, moved
+   from the old center-column controls-bar into the header's right side. */
+.header-controls { margin-left: auto; }
+.header-controls-inner { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
 .edu-btn {
   font-family: var(--font-display); font-weight: 600; font-size: 14px;
   background: var(--marigold); color: var(--on-primary); border: none;
@@ -201,6 +206,14 @@ body.edu { background: var(--paper); color: var(--ink); font-family: var(--font-
 .settings-note { color: var(--ink-3); font-size: 0.76rem; line-height: 1.5; margin: 8px 0 0; }
 .settings-error { color: var(--marigold-ink); font-size: 0.8rem; margin: 8px 0 0; }
 
+/* model discovery + "Get a key" link (Task 9) */
+.settings-key-link {
+  align-self: flex-start; font-size: 0.76rem; color: var(--teal-ink);
+  text-decoration: none; margin-top: 2px;
+}
+.settings-key-link:hover { text-decoration: underline; }
+.settings-key-link:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
 /* sr-only: visually hidden but still reachable by assistive tech (the standard
    clip-based technique) – used for the #live-announcer aria-live region so its text
    is announced without taking up any visible layout space. */
@@ -218,8 +231,9 @@ body.edu { background: var(--paper); color: var(--ink); font-family: var(--font-
 
 .col-center { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
 
-.controls-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.controls-bar .review-status { font-family: var(--font-mono); font-size: 0.78rem; color: var(--teal-ink); }
+/* run status (Task 9): moved out of the old .controls-bar into its own line above
+   the review bar, in the center column, next to the grid it describes. */
+.review-status { font-family: var(--font-mono); font-size: 0.78rem; color: var(--teal-ink); }
 
 /* progress bar: "generation g / 10", visible only while a run is under way. The
    track (.progress-bar-track) is a fixed-width background bar; .progress-bar-fill
@@ -285,6 +299,9 @@ body.edu { background: var(--paper); color: var(--ink); font-family: var(--font-
 #log { display: flex; flex-direction: column; gap: 6px; max-height: 70vh; overflow-y: auto; }
 #log:empty::before { content: "No generations run yet."; color: var(--ink-3); font-size: 0.82rem; }
 .log-entry {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
   font-size: 0.8rem;
   border-left: 3px solid var(--line-2);
   padding: 4px 8px;
@@ -292,6 +309,18 @@ body.edu { background: var(--paper); color: var(--ink); font-family: var(--font-
 }
 .log-entry[data-source="manual"] { border-left-color: var(--teal); }
 .log-entry[data-source="ai"] { border-left-color: var(--marigold); }
+
+/* winner thumbnail (Task 9): sits left of the entry text, sized in css px – the
+   backing canvas resolution is device-pixel-ratio scaled from app.js. */
+.log-thumb {
+  flex: 0 0 auto;
+  width: 64px; height: 80px;
+  display: block;
+  background: var(--canvas);
+  border: 1px solid var(--line);
+  border-radius: var(--r-xs);
+}
+.log-entry-text { flex: 1 1 auto; min-width: 0; }
 
 .done-panel { display: flex; flex-direction: column; gap: 16px; }
 .done-portrait, .done-composite { margin: 0; }
@@ -321,6 +350,12 @@ body.edu { background: var(--paper); color: var(--ink); font-family: var(--font-
   .edu-wordmark { font-size: 18px; }
   .edu-tag { display: none; }
   .edu-btn { padding: 8px 14px; font-size: 13px; }
+  /* header controls (Task 9): wrap onto their own full-width row instead of
+     overflowing when Start/Pause/Stop + the progress bar no longer fit beside
+     the wordmark. */
+  .header-controls { margin-left: 0; width: 100%; }
+  .header-controls-inner { width: 100%; }
+  .progress-bar { max-width: none; }
   #app {
     grid-template-columns: 1fr;
     padding: 12px 14px 8px;

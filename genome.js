@@ -1,6 +1,6 @@
 /* ============================================================
    GENOME – the genome domains, RNG, and drawing/rendering logic
-   for Likeness Evolver. Classic script (no modules).
+   for DrawMe. Classic script (no modules).
 
    Node-testability: everything except drawFace/renderGenome must
    run in Node without a DOM – no touching pen/document/window at

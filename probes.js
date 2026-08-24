@@ -1,5 +1,5 @@
 /* ============================================================
-   PROBES – dev-harness self-checks for Likeness Evolver.
+   PROBES – dev-harness self-checks for DrawMe.
    Exposes window.Probes = { run() } returning [{name, pass, detail}].
    ============================================================ */
 

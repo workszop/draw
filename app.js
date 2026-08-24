@@ -1,5 +1,5 @@
 /* ============================================================
-   APP – Likeness Evolver UI. Classic script (no modules).
+   APP – DrawMe UI. Classic script (no modules).
    Drives a plain state object; every UI change re-renders from state.
    Task 4 scope: shell, grid, state machine skeleton, DOM contract.
    The full GA run loop (judging, elitism, mutation wiring) lands in Task 5;
@@ -25,11 +25,18 @@ var COMPOSITE_GAP = 24;                  // px gap between photo and portrait in
 
 // ─── Constants: AI judge (Task 6, spec §4) ───
 
-var PROVIDERS = ['gemini', 'openai', 'claude'];
-var PROVIDER_LABELS = { gemini: 'Gemini', openai: 'OpenAI', claude: 'Claude' };
-var MODELS = { gemini: 'gemini-2.5-flash', openai: 'gpt-4o', claude: 'claude-sonnet-5' };
+/* PROVIDERS/PROVIDER_LABELS are derived from ai-models.js's AI_MODEL_CATALOG
+   (Task 9) so the provider list, labels, curated model lists, key metadata and
+   discovery endpoint shape all live in one place. */
+var PROVIDERS = Object.keys(window.AI_MODEL_CATALOG.providers);
+var PROVIDER_LABELS = {};
+PROVIDERS.forEach(function (p) { PROVIDER_LABELS[p] = window.AI_MODEL_CATALOG.providers[p].label; });
 var JUDGE_RETRY_MS = 1500;               // judge failure path (spec §6): retry once after this delay
 var MAX_HINTS_REQUESTED = 4;             // prompt-side cap; the sanitizer itself does not truncate the list
+
+// ─── Constants: log thumbnails (Task 9) ───
+
+var LOG_THUMB_W = 64, LOG_THUMB_H = 80;  // css px; backing canvas is device-pixel-ratio scaled
 
 /* trait vocabulary the prompt hands the model, read straight off Genome.HINT_MAP's
    keys so the prompt, the sanitizer (genome.js) and hintsToGenes() can never drift apart. */
@@ -56,6 +63,7 @@ var App = {
     provider: initialSettings.provider,   // 'gemini' | 'openai' | 'claude'
     models: initialSettings.models,       // { gemini, openai, claude } model name text
     keys: initialSettings.keys,           // { gemini, openai, claude } API key text – never logged
+    discovered: { gemini: [], openai: [], claude: [] }, // Task 9: extra model IDs discovered per provider (non-curated only), runtime-only
     settingsHighlight: false,             // true right after a blocked Start (missing key)
     settingsError: null,                  // message shown in the settings panel
     runError: null,                       // judge-failure message shown while phase === 'paused'
@@ -109,9 +117,20 @@ var judgeRetryTimerId = null;
    would let a straggling promise from the OLD run sail right through. */
 var judgeEpoch = 0;
 
+/* lastDiscoveryKey – per-provider bookkeeping for model discovery (Task 9), same
+   "runtime-only, not App.state" reasoning as judgeEpoch above: a plain closure var
+   so a settings-panel re-render never re-fires discovery for a key it has already
+   fired for. Maps provider -> the exact key string discovery was last kicked off
+   with (or null). When discoverProviderModels resolves, the result is only applied
+   if App.state.provider and App.state.keys[provider] still match what the fetch
+   was fired for – the same stale-guard shape as judgeEpoch, just keyed on
+   (provider, key) instead of an incrementing counter. */
+var lastDiscoveryKey = { gemini: null, openai: null, claude: null };
+
 // ─── DOM refs ───
 
 var appEl = document.getElementById('app');
+var headerControlsEl = document.getElementById('header-controls');
 var probesEl = document.getElementById('probes');
 var liveEl = document.getElementById('live-announcer'); // sr-only aria-live region, outside #app so re-render never touches it
 
@@ -232,8 +251,9 @@ function buildGridJpeg(population) {
    returns a complete, valid object built from MODELS defaults. Never throws, never logs
    the key values it finds. */
 function loadSettings() {
-  var provider = 'gemini';
-  var models = { gemini: MODELS.gemini, openai: MODELS.openai, claude: MODELS.claude };
+  var provider = window.AI_MODEL_CATALOG.defaultProvider;
+  var models = {};
+  PROVIDERS.forEach(function (p) { models[p] = window.AI_MODEL_CATALOG.providers[p].models[0]; });
   var keys = { gemini: '', openai: '', claude: '' };
   try {
     var rawSettings = window.localStorage.getItem('draw.settings');
@@ -287,6 +307,101 @@ function saveKeys() {
 function hasKey(provider) {
   var key = App.state.keys[provider];
   return typeof key === 'string' && key.trim().length > 0;
+}
+
+// ─── Helpers: AI model discovery (Task 9, adapted from slidegen/pure.js) ───
+
+/* providerModelIds(providerId, payload) -> string[] of model IDs read out of a
+   discovery endpoint's JSON body, per that provider's catalog listPath/listStrip.
+   Tolerant of a missing/malformed payload (returns []). Never throws. */
+function providerModelIds(providerId, payload) {
+  var info = window.AI_MODEL_CATALOG.providers[providerId];
+  if (!info || !info.listPath) return [];
+  var rows = payload && payload[info.listPath];
+  if (!Array.isArray(rows)) return [];
+  var strip = info.listStrip instanceof RegExp ? info.listStrip : null;
+  return rows
+    .map(function (row) { return String((row && (row.id != null ? row.id : row.name)) || ''); })
+    .map(function (id) { return strip ? id.replace(strip, '') : id; })
+    .map(function (id) { return id.trim(); })
+    .filter(function (id) { return id && !/\s/.test(id); });
+}
+
+/* discoverProviderModels(providerId, key, {timeoutMs}) -> Promise<string[]>.
+   Best-effort: any failure (no key, offline, non-2xx, non-JSON, timeout) resolves
+   with the curated list unchanged rather than rejecting, so callers never need a
+   .catch(). Curated order always leads; live extras the catalog doesn't know yet
+   are deduplicated and appended. The key is used only in the provider's documented
+   list-auth shape (query key for Gemini, Bearer for OpenAI, anthropic headers for
+   Claude) and is never logged. */
+function discoverProviderModels(providerId, key, options) {
+  options = options || {};
+  var timeoutMs = options.timeoutMs === undefined ? 15000 : options.timeoutMs;
+  var info = window.AI_MODEL_CATALOG.providers[providerId];
+  var curated = (info && info.models) || [];
+  if (!info || !info.listUrl || !key) return Promise.resolve(curated.slice());
+
+  var url = info.listUrl;
+  var headers = {};
+  if (info.listAuth === 'query-key') {
+    url += (url.indexOf('?') >= 0 ? '&' : '?') + 'key=' + encodeURIComponent(key);
+  } else if (info.listAuth === 'bearer') {
+    headers.Authorization = 'Bearer ' + key;
+  } else if (info.listAuth === 'anthropic') {
+    headers['x-api-key'] = key;
+    headers['anthropic-version'] = '2023-06-01';
+    headers['anthropic-dangerous-direct-browser-access'] = 'true';
+  }
+
+  var controller = new AbortController();
+  var timeoutId = window.setTimeout(function () { controller.abort(); }, timeoutMs);
+
+  return fetch(url, { headers: headers, signal: controller.signal }).then(function (res) {
+    if (!res.ok) return curated.slice();
+    return res.json().catch(function () { return null; }).then(function (payload) {
+      var live = providerModelIds(providerId, payload);
+      var seen = {}, extra = [];
+      live.forEach(function (id) {
+        if (curated.indexOf(id) < 0 && !seen[id]) { seen[id] = true; extra.push(id); }
+      });
+      return curated.concat(extra);
+    });
+  }).catch(function () {
+    return curated.slice();
+  }).then(function (result) {
+    window.clearTimeout(timeoutId);
+    return result;
+  }, function () {
+    window.clearTimeout(timeoutId);
+    return curated.slice();
+  });
+}
+
+/* maybeDiscoverModels(s) – called every time the settings panel renders. Fires
+   discoverProviderModels at most once per distinct (provider, key) pair (tracked in
+   lastDiscoveryKey, a plain closure var – see its declaration above) so a saved key
+   triggers discovery on the settings panel's first render, and a key change (which
+   changes what's in App.state.keys[provider]) triggers it again, without refiring on
+   every unrelated re-render. On resolution, the result is applied only if the
+   provider and key are still what the fetch was fired for (App.state may have moved
+   on – provider switched, key edited again – while the request was in flight). */
+function maybeDiscoverModels(s) {
+  var provider = s.provider;
+  var key = s.keys[provider];
+  if (!key || !key.trim()) return;
+  if (lastDiscoveryKey[provider] === key) return; // already discovered (or discovering) for this exact key
+  lastDiscoveryKey[provider] = key;
+  var curated = window.AI_MODEL_CATALOG.providers[provider].models;
+  discoverProviderModels(provider, key).then(function (list) {
+    if (App.state.provider !== provider || App.state.keys[provider] !== key) return; // stale – provider/key moved on
+    var extra = list.filter(function (m) { return curated.indexOf(m) < 0; });
+    var discovered = {};
+    for (var k in App.state.discovered) {
+      if (Object.prototype.hasOwnProperty.call(App.state.discovered, k)) discovered[k] = App.state.discovered[k];
+    }
+    discovered[provider] = extra;
+    App.set({ discovered: discovered });
+  });
 }
 
 // ─── Helpers: AI judge adapters (spec §4.4) ───
@@ -407,11 +522,22 @@ function judgeClaude(model, key, photoDataUrl, gridDataUrl) {
   });
 }
 
-/* makeLogEntry(gen, best, source, hints, detail) – pure, does not touch state; callers
-   combine the returned entry into the same App.set() that also advances the run, so a
-   generation's log line and its state transition land in a single re-render. */
-function makeLogEntry(gen, best, source, hints, detail) {
-  return { gen: gen, best: best, source: source, hints: hints || [], detail: detail || '' };
+/* makeLogEntry(gen, best, source, hints, detail, genome) – pure, does not touch
+   state; callers combine the returned entry into the same App.set() that also
+   advances the run, so a generation's log line and its state transition land in a
+   single re-render. genome (Task 9) is the winning candidate's genome, kept on the
+   entry (not a pre-rendered canvas/data URL) so renderRightColumn can rebuild the
+   thumbnail from it on every re-render – determinism (Genome.renderGenome renders
+   the same genome identically every time) guarantees that rebuild always matches
+   the picked cell, even after the population has since moved on. hash is
+   precomputed here so it lands on data-winner-hash without re-hashing on every
+   render. */
+function makeLogEntry(gen, best, source, hints, detail, genome) {
+  return {
+    gen: gen, best: best, source: source, hints: hints || [], detail: detail || '',
+    genome: genome || null,
+    hash: genome ? window.Genome.genomeHash(genome) : null,
+  };
 }
 
 // ─── Helpers: review timer (drives REVIEW_MS auto-advance; Pause/Resume freezes it) ───
@@ -525,6 +651,22 @@ function buildPortraitCanvas(genome) {
   return canvas;
 }
 
+/* buildLogThumbCanvas(genome) (Task 9) -> a small canvas (LOG_THUMB_W x
+   LOG_THUMB_H css px, device-pixel-ratio aware) rendered from a winner's genome
+   for the log entry. Called fresh on every render() of the log, never cached, so
+   determinism (same genome -> identical render) is what keeps a re-render's
+   thumbnail matching the cell that was actually picked. */
+function buildLogThumbCanvas(genome) {
+  var dpr = window.devicePixelRatio || 1;
+  var canvas = document.createElement('canvas');
+  canvas.width = Math.round(LOG_THUMB_W * dpr);
+  canvas.height = Math.round(LOG_THUMB_H * dpr);
+  canvas.style.width = LOG_THUMB_W + 'px';
+  canvas.style.height = LOG_THUMB_H + 'px';
+  window.Genome.renderGenome(canvas, genome);
+  return canvas;
+}
+
 /* buildComposite(photo, portraitCanvas, callback) – async (Image decode): photo left,
    portrait right, equal heights, paper background from tokens read at call time.
    callback(dataUrl) fires once, with null if the stored photo data URL fails to decode
@@ -590,7 +732,7 @@ function advanceGeneration() {
   var winnerIndex = s.winner;
   var winnerGenome = s.population[winnerIndex - 1];
   var hints = s.winnerHints || [];
-  var entry = makeLogEntry(s.generation, winnerIndex, s.winnerSource || 'manual', hints);
+  var entry = makeLogEntry(s.generation, winnerIndex, s.winnerSource || 'manual', hints, undefined, winnerGenome);
 
   if (s.generation >= MAX_GENERATIONS) {
     finishRun(winnerIndex, entry);
@@ -640,6 +782,11 @@ function render() {
   appEl.appendChild(renderLeftColumn(s));
   appEl.appendChild(renderCenterColumn(s));
   appEl.appendChild(renderRightColumn(s));
+
+  if (headerControlsEl) {
+    clearEl(headerControlsEl);
+    headerControlsEl.appendChild(renderHeaderControls(s));
+  }
 
   if (liveEl) liveEl.textContent = computeLiveAnnouncement(s);
 }
@@ -706,6 +853,61 @@ function renderReviewBar(s) {
   return wrap;
 }
 
+/* renderHeaderControls(s) (Task 9): Start/Pause-Resume/Stop + the "Gen g / 10"
+   progress bar, rendered into the header's #header-controls slot on every render()
+   (moved out of the center column's old controls-bar, per the brief). Same
+   enabled/disabled rules and same click handlers as before – only where they render
+   changed, not what they do, so every keyboard shortcut (which calls these same
+   handlers directly, not via DOM lookups) keeps working unchanged. */
+function renderHeaderControls(s) {
+  var wrap = el('div', { class: 'header-controls-inner' });
+
+  var startBtn = el('button', { class: 'edu-btn', type: 'button', text: 'Start' });
+  startBtn.disabled = s.state !== 'ready';
+  startBtn.addEventListener('click', onStartClick);
+
+  var pauseLabel = s.phase === 'paused' ? 'Resume' : 'Pause';
+  var pauseBtn = el('button', { class: 'edu-btn ghost', type: 'button', text: pauseLabel });
+  pauseBtn.disabled = s.state !== 'running' || (s.phase !== 'reviewing' && s.phase !== 'paused');
+  pauseBtn.addEventListener('click', onPauseResumeClick);
+
+  var stopBtn = el('button', { class: 'edu-btn ghost', type: 'button', text: 'Stop' });
+  stopBtn.disabled = s.state !== 'running';
+  stopBtn.addEventListener('click', onStopClick);
+
+  wrap.appendChild(startBtn);
+  wrap.appendChild(pauseBtn);
+  wrap.appendChild(stopBtn);
+
+  var progress = renderProgressBar(s);
+  if (progress) wrap.appendChild(progress);
+
+  return wrap;
+}
+
+/* renderRunStatus(s) – the one-line phase status ("Judge is looking at the
+   grid…", "Paused – …", "Pick a candidate…") that used to sit inline in the old
+   center-column controls bar; kept with the grid (per the brief: "the review
+   countdown bar stays with the grid") since both describe the current phase of
+   the run that's on screen right below. Returns null when there's nothing to say
+   (not currently running). */
+function renderRunStatus(s) {
+  if (s.state !== 'running') return null;
+  var status = el('div', { class: 'review-status' });
+  if (s.phase === 'judging') {
+    status.appendChild(el('span', { class: 'judging-indicator', 'aria-hidden': 'true' }));
+    status.appendChild(document.createTextNode('Judge is looking at the grid…'));
+  } else if (s.phase === 'paused') {
+    status.textContent = s.runError ? s.runError : (s.winner ? 'Paused – press Resume to continue' : 'Paused – pick a candidate, then Resume');
+  } else if (s.winner) {
+    status.textContent = 'Winner picked' + (s.winnerSource === 'ai' ? ' by the judge' : '') +
+      ' – advancing soon (press Enter now)';
+  } else {
+    status.textContent = 'Pick a candidate: click a cell or press 1-9';
+  }
+  return status;
+}
+
 function renderLeftColumn(s) {
   var col = el('div', { class: 'col-left' });
 
@@ -760,49 +962,98 @@ function renderLeftColumn(s) {
   return col;
 }
 
-/* renderSettingsPanel(s) – provider select, that provider's model + key inputs
-   (prefilled from MODELS / localStorage), a "keys stay in this browser" note, and
-   (when Start was just blocked for a missing key) a highlighted border + message. */
+/* renderSettingsPanel(s) (Task 9) – provider select; that provider's model select
+   (curated models from AI_MODEL_CATALOG, discovered extras tagged "(discovered)",
+   plus a "Custom…" option revealing a text input – a stored non-curated model
+   shows as that custom value); a key input using the catalog's keyPlaceholder plus
+   a "Get a key" link (keyUrl); a "keys stay in this browser" note; and (when Start
+   was just blocked for a missing key) a highlighted border + message. Also kicks
+   off model discovery for the current provider/key (best-effort, see
+   maybeDiscoverModels). */
 function renderSettingsPanel(s) {
   var panel = el('div', {
     class: 'panel settings-panel' + (s.settingsHighlight ? ' is-highlighted' : ''),
   });
   panel.appendChild(el('h2', { text: 'Settings' }));
 
+  var catalogProvider = window.AI_MODEL_CATALOG.providers[s.provider];
+
   var providerRow = el('div', { class: 'settings-row' });
   providerRow.appendChild(el('label', { for: 'settings-provider', text: 'Provider' }));
-  var select = el('select', { id: 'settings-provider' });
+  var providerSelect = el('select', { id: 'settings-provider' });
   PROVIDERS.forEach(function (p) {
     var opt = el('option', { value: p, text: PROVIDER_LABELS[p] });
     if (p === s.provider) opt.setAttribute('selected', 'selected');
-    select.appendChild(opt);
+    providerSelect.appendChild(opt);
   });
-  select.addEventListener('change', function () { onProviderChange(select.value); });
-  providerRow.appendChild(select);
+  providerSelect.addEventListener('change', function () { onProviderChange(providerSelect.value); });
+  providerRow.appendChild(providerSelect);
   panel.appendChild(providerRow);
+
+  var CUSTOM_VALUE = '__custom__';
+  var curatedModels = catalogProvider.models;
+  var discoveredExtra = (s.discovered && s.discovered[s.provider]) || [];
+  var combinedModels = curatedModels.concat(discoveredExtra.filter(function (m) { return curatedModels.indexOf(m) < 0; }));
+  var currentModel = s.models[s.provider];
+  var isCurrentKnown = combinedModels.indexOf(currentModel) >= 0;
 
   var modelRow = el('div', { class: 'settings-row' });
   modelRow.appendChild(el('label', { for: 'settings-model', text: 'Model' }));
-  var modelInput = el('input', { id: 'settings-model', type: 'text', autocomplete: 'off' });
-  modelInput.value = s.models[s.provider];
-  modelInput.addEventListener('change', function () { onModelChange(modelInput.value); });
-  modelRow.appendChild(modelInput);
+  var modelSelect = el('select', { id: 'settings-model' });
+  combinedModels.forEach(function (m) {
+    var label = curatedModels.indexOf(m) >= 0 ? m : m + ' (discovered)';
+    var opt = el('option', { value: m, text: label });
+    modelSelect.appendChild(opt);
+  });
+  modelSelect.appendChild(el('option', { value: CUSTOM_VALUE, text: 'Custom…' }));
+  modelSelect.value = isCurrentKnown ? currentModel : CUSTOM_VALUE;
+  modelRow.appendChild(modelSelect);
   panel.appendChild(modelRow);
+
+  var customModelRow = el('div', { class: 'settings-row settings-row-custom-model' });
+  if (isCurrentKnown) customModelRow.style.display = 'none';
+  customModelRow.appendChild(el('label', { for: 'settings-model-custom', text: 'Custom model ID' }));
+  var customModelInput = el('input', { id: 'settings-model-custom', type: 'text', autocomplete: 'off' });
+  customModelInput.value = isCurrentKnown ? '' : currentModel;
+  customModelRow.appendChild(customModelInput);
+  panel.appendChild(customModelRow);
+
+  modelSelect.addEventListener('change', function () {
+    if (modelSelect.value === CUSTOM_VALUE) {
+      customModelRow.style.display = '';
+      customModelInput.focus();
+    } else {
+      customModelRow.style.display = 'none';
+      onModelChange(modelSelect.value);
+    }
+  });
+  customModelInput.addEventListener('change', function () {
+    var v = customModelInput.value.trim();
+    if (v) onModelChange(v);
+  });
 
   var keyRow = el('div', { class: 'settings-row' });
   keyRow.appendChild(el('label', { for: 'settings-key', text: PROVIDER_LABELS[s.provider] + ' API key' }));
   var keyInput = el('input', {
     id: 'settings-key', type: 'password', autocomplete: 'off', spellcheck: 'false',
+    placeholder: catalogProvider.keyPlaceholder || '',
   });
   keyInput.value = s.keys[s.provider];
   keyInput.addEventListener('change', function () { onKeyChange(keyInput.value); });
   keyRow.appendChild(keyInput);
+  if (catalogProvider.keyUrl) {
+    keyRow.appendChild(el('a', {
+      class: 'settings-key-link', href: catalogProvider.keyUrl, target: '_blank', rel: 'noopener', text: 'Get a key',
+    }));
+  }
   panel.appendChild(keyRow);
 
   panel.appendChild(el('p', {
     class: 'settings-note',
     text: 'Keys stay in this browser (saved to localStorage) and are sent only to the selected provider.',
   }));
+
+  maybeDiscoverModels(s); // Task 9: best-effort, fires at most once per (provider, key) pair
 
   if (s.settingsError) {
     panel.appendChild(el('p', { class: 'settings-error', text: s.settingsError }));
@@ -816,46 +1067,10 @@ function renderCenterColumn(s) {
 
   var col = el('div', { class: 'col-center' });
 
-  // ── controls bar ──
-  var bar = el('div', { class: 'controls-bar panel' });
-
-  var startBtn = el('button', { class: 'edu-btn', type: 'button', text: 'Start' });
-  startBtn.disabled = s.state !== 'ready';
-  startBtn.addEventListener('click', onStartClick);
-
-  var pauseLabel = s.phase === 'paused' ? 'Resume' : 'Pause';
-  var pauseBtn = el('button', { class: 'edu-btn ghost', type: 'button', text: pauseLabel });
-  pauseBtn.disabled = s.state !== 'running' || (s.phase !== 'reviewing' && s.phase !== 'paused');
-  pauseBtn.addEventListener('click', onPauseResumeClick);
-
-  var stopBtn = el('button', { class: 'edu-btn ghost', type: 'button', text: 'Stop' });
-  stopBtn.disabled = s.state !== 'running';
-  stopBtn.addEventListener('click', onStopClick);
-
-  bar.appendChild(startBtn);
-  bar.appendChild(pauseBtn);
-  bar.appendChild(stopBtn);
-
-  var progress = renderProgressBar(s);
-  if (progress) bar.appendChild(progress);
-
-  var status = el('span', { class: 'review-status' });
-  if (s.state === 'running') {
-    if (s.phase === 'judging') {
-      status.appendChild(el('span', { class: 'judging-indicator', 'aria-hidden': 'true' }));
-      status.appendChild(document.createTextNode('Judge is looking at the grid…'));
-    } else if (s.phase === 'paused') {
-      status.textContent = s.runError ? s.runError : (s.winner ? 'Paused – press Resume to continue' : 'Paused – pick a candidate, then Resume');
-    } else if (s.winner) {
-      status.textContent = 'Winner picked' + (s.winnerSource === 'ai' ? ' by the judge' : '') +
-        ' – advancing soon (press Enter now)';
-    } else {
-      status.textContent = 'Pick a candidate: click a cell or press 1-9';
-    }
-  }
-
-  bar.appendChild(status);
-  col.appendChild(bar);
+  // ── run status (Task 9: Start/Pause/Stop + Gen g/10 moved to the header;
+  // this one-line phase status stays with the grid, right above the review bar) ──
+  var status = renderRunStatus(s);
+  if (status) col.appendChild(status);
 
   // ── review countdown bar (Task 7, deferred item a): thin bar draining over the
   // REVIEW_MS auto-advance window; frozen (not animating) while paused. Reads the
@@ -945,13 +1160,13 @@ function renderDoneCenter(s) {
   var actions = el('div', { class: 'done-actions' });
 
   var portraitLink = el('a', {
-    class: 'edu-btn', download: 'likeness-portrait.png', text: 'Download portrait PNG',
+    class: 'edu-btn', download: 'drawme-portrait.png', text: 'Download portrait PNG',
   });
   portraitLink.href = s.portraitDataUrl;
   actions.appendChild(portraitLink);
 
   var compositeLink = el('a', {
-    class: 'edu-btn ghost', download: 'likeness-side-by-side.png', text: 'Download side-by-side PNG',
+    class: 'edu-btn ghost', download: 'drawme-side-by-side.png', text: 'Download side-by-side PNG',
   });
   if (s.compositeDataUrl) {
     compositeLink.href = s.compositeDataUrl;
@@ -986,14 +1201,33 @@ function renderRightColumn(s) {
       'data-best': String(entry.best),
       'data-source': entry.source,
       'data-hints': String((entry.hints || []).length),
+      'data-winner-hash': entry.hash || '', // Task 9: DOM contract gains this attribute, never loses one
     });
+
+    /* winner thumbnail (Task 9): rebuilt fresh from entry.genome on every render –
+       never cached/stored as a data URL – so determinism keeps it matching the
+       cell that was actually picked even long after the population moved on. A
+       plain <canvas role="img"> (canvas has no native alt) with an aria-label
+       carries the accessible name; the final "done" entry's genome is the same
+       one that produced the final portrait, so it shows the same face. */
+    if (entry.genome) {
+      var thumbCanvas = buildLogThumbCanvas(entry.genome);
+      thumbCanvas.className = 'log-thumb';
+      thumbCanvas.setAttribute('role', 'img');
+      thumbCanvas.setAttribute('aria-label', 'Generation ' + entry.gen + ' winner');
+      line.appendChild(thumbCanvas);
+    }
+
+    var text = el('div', { class: 'log-entry-text' });
     var hintsText = entry.hints && entry.hints.length
       ? entry.hints.map(function (h) { return h.trait + ': ' + h.suggestion; }).join(', ')
       : 'none';
     /* textContent only – never innerHTML – so a malformed/adversarial hint suggestion
        (already truncated + trait-filtered by the sanitizer) can never inject markup. */
-    line.textContent = 'Gen ' + entry.gen + ' – best ' + entry.best + ' (' + entry.source + ')' +
+    text.textContent = 'Gen ' + entry.gen + ' – best ' + entry.best + ' (' + entry.source + ')' +
       ' – hints: ' + hintsText + (entry.detail ? ' – ' + entry.detail : '');
+    line.appendChild(text);
+
     log.appendChild(line);
   });
   panel.appendChild(log);
@@ -1071,7 +1305,7 @@ function onStopClick() {
   var source = s.winner ? (s.winnerSource || 'manual') : 'manual';
   var hints = s.winner ? (s.winnerHints || []) : [];
   var entry = makeLogEntry(s.generation, winnerIndex, source, hints,
-    s.winner ? 'stopped' : 'stopped before a pick – used cell 1');
+    s.winner ? 'stopped' : 'stopped before a pick – used cell 1', s.population[winnerIndex - 1]);
   finishRun(winnerIndex, entry);
 }
 
@@ -1085,7 +1319,7 @@ function triggerPortraitDownload() {
   if (!s.portraitDataUrl) return;
   var link = document.createElement('a');
   link.href = s.portraitDataUrl;
-  link.download = 'likeness-portrait.png';
+  link.download = 'drawme-portrait.png';
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
