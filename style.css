@@ -1,0 +1,39 @@
+/* ─── Tokens: the drawing palette (from faces/shared/palette.css) plus the
+   edulab UI tokens the app chrome needs (from faces/shared/edulab.css).
+   pen.js and genome.js read colours only from here via tok()/toks(). ─── */
+:root {
+  /* ── drawing paper & inks ── */
+  --canvas: #FFFFFF;
+  --ink: #211E1A;
+  --ink-sepia: #5B3F2E;
+  --ink-blue: #1B4E88;
+
+  /* ── marker box: skins, hair, tints, hats, accents, blush ── */
+  --skin-1: #e9c2a6; --skin-2: #dca884; --skin-3: #caa07a; --skin-4: #b9855e;
+  --skin-5: #e6b9b0; --skin-6: #a36d4b; --skin-7: #7f5236;
+  --hair-1: #3a2a22; --hair-2: #2c3340; --hair-3: #5a3b2b; --hair-4: #4a4642;
+  --tint-1: #c9a46a; --tint-2: #a8765a; --tint-3: #b7b3aa; --tint-4: #8c6b7a;
+  --hat-1: #6b7f98; --hat-2: #7d8a5e; --hat-3: #b68b4c; --hat-4: #a9504a; --hat-5: #8d8f91;
+  --accent-1: #b8463e; --accent-2: #4f6f96; --accent-3: #c9962f;
+  --blush: #d98a85;
+
+  /* ── edulab UI chrome: background, text, accent teal/marigold ── */
+  --paper: #FBF7F0;
+  --paper-2: #F4EDDF;
+  --paper-3: #ECE1CF;
+  --surface: #FFFFFF;
+  --ink-2: #5B554D;
+  --ink-3: #938A7C;
+  --line: #E7DCCB;
+  --line-2: #D6C8B2;
+
+  --marigold: #E8920C;
+  --marigold-600: #CE800A;
+  --marigold-soft: #FBE7C2;
+  --marigold-ink: #8A4F00;
+
+  --teal: #0E8C7F;
+  --teal-600: #0B7468;
+  --teal-soft: #D2EBE6;
+  --teal-ink: #0A5A52;
+}
