@@ -64,14 +64,34 @@
      pattern's negative lookahead excludes sk-ant- keys), so at most one provider
      ever matches. Never logs or echoes the key itself. */
   AI_MODEL_CATALOG.keyLooksLike = function keyLooksLike(key) {
-    if (typeof key !== 'string' || !key) return null;
+    if (typeof key !== 'string') return null;
+    var trimmed = key.trim(); // Task 13 fix: leading/trailing whitespace must not dodge the guard
+    if (!trimmed) return null;
     var providerIds = Object.keys(AI_MODEL_CATALOG.providers);
     for (var i = 0; i < providerIds.length; i++) {
       var p = providerIds[i];
       var pattern = AI_MODEL_CATALOG.providers[p].keyPattern;
-      if (pattern && pattern.test(key)) return p;
+      if (pattern && pattern.test(trimmed)) return p;
     }
     return null;
+  };
+
+  /* redactKeys(text) -> text with any whitespace-delimited token that
+     keyLooksLike() recognizes as an API key replaced by '<key>' (Task 13 review
+     fix: OpenAI's 401 body echoes the submitted key partially masked, e.g.
+     "Incorrect API key provided: AIzaSyD8***...WxYz...", so a provider error
+     detail can carry a key fragment even though the key itself is never a
+     labeled field in the JSON). Pure, Node-testable, defensive – it runs over
+     provider error text before that text is ever shown to the user. Splits on
+     whitespace only (keys never contain spaces), tests each token against every
+     provider's keyPattern via keyLooksLike, and swaps matches for '<key>'.
+     Ordinary words never match a keyPattern, so normal sentences pass through
+     unchanged. */
+  AI_MODEL_CATALOG.redactKeys = function redactKeys(text) {
+    if (typeof text !== 'string' || !text) return text;
+    return text.split(/(\s+)/).map(function (token) {
+      return AI_MODEL_CATALOG.keyLooksLike(token) ? '<key>' : token;
+    }).join('');
   };
 
   /* healKeys(settings) -> { settings, healed } (Task 13, pure, Node-testable via
@@ -80,11 +100,16 @@
      order; the first slot whose key mismatches its OWN provider's pattern but
      unambiguously matches a DIFFERENT provider's pattern, whose slot is empty, gets
      moved there (never overwrites a non-empty destination, never deletes a key with
-     no match). If the originally selected provider is left keyless by the move and
-     the destination now has a key, the selected provider switches too. At most one
-     heal per call, so a second call on the now-healed settings is a no-op (idempotent
-     by construction: the healed key now matches its new slot's own pattern, so no
-     slot is "mismatched" any more). Never logs a key value. */
+     no match). Repeats this scan until a full pass makes no further move, so a
+     double-misplacement (e.g. a Gemini key under openai AND a Claude key under
+     gemini, both true destinations empty) heals every slot it can in one call
+     instead of just the first – each move can only ever free up the slot it
+     vacates, never touch a still-occupied one, so the loop always terminates (at
+     most one heal per provider slot). If the originally selected provider is left
+     keyless and the LAST move's destination now has a key, the selected provider
+     switches there too. Idempotent: a second call on the now-healed settings is a
+     no-op, since every healed key now matches its new slot's own pattern. Never
+     logs a key value. */
   AI_MODEL_CATALOG.healKeys = function healKeys(settings) {
     var providerIds = Object.keys(AI_MODEL_CATALOG.providers);
     var keys = {};
@@ -92,24 +117,30 @@
       keys[p] = (settings && settings.keys && typeof settings.keys[p] === 'string') ? settings.keys[p] : '';
     });
     var provider = settings && settings.provider;
-    var healed = null;
-    providerIds.forEach(function (p) {
-      if (healed) return; // only one heal per call
-      var key = keys[p];
-      if (!key) return;
-      var ownPattern = AI_MODEL_CATALOG.providers[p].keyPattern;
-      if (ownPattern && ownPattern.test(key)) return; // fits its own slot already – nothing to heal
-      var target = AI_MODEL_CATALOG.keyLooksLike(key);
-      if (!target || target === p) return; // no unambiguous match elsewhere (garbage key) – leave it alone
-      if (keys[target]) return; // destination occupied – never overwrite a non-empty slot
-      keys[target] = key;
-      keys[p] = '';
-      healed = { from: p, to: target };
-    });
-    if (healed && !keys[provider] && keys[healed.to]) provider = healed.to;
+    var lastHeal = null;
+    var movedAny = true;
+    while (movedAny) {
+      movedAny = false;
+      for (var i = 0; i < providerIds.length; i++) {
+        var p = providerIds[i];
+        var key = keys[p];
+        if (!key) continue;
+        var ownPattern = AI_MODEL_CATALOG.providers[p].keyPattern;
+        if (ownPattern && ownPattern.test(key)) continue; // fits its own slot already – nothing to heal
+        var target = AI_MODEL_CATALOG.keyLooksLike(key);
+        if (!target || target === p) continue; // no unambiguous match elsewhere (garbage key) – leave it alone
+        if (keys[target]) continue; // destination occupied – never overwrite a non-empty slot
+        keys[target] = key;
+        keys[p] = '';
+        lastHeal = { from: p, to: target };
+        movedAny = true;
+        break; // restart the scan from the top so ordering never masks a second heal
+      }
+    }
+    if (lastHeal && !keys[provider] && keys[lastHeal.to]) provider = lastHeal.to;
     return {
       settings: { provider: provider, models: settings && settings.models, keys: keys },
-      healed: healed,
+      healed: lastHeal,
     };
   };
 

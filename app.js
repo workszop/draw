@@ -75,6 +75,15 @@ var initialSettings = loadSettings(); // localStorage['draw.settings'] + ['draw.
    happens once App/saveSettings/saveKeys exist, right below the App object. */
 var initialHeal = window.AI_MODEL_CATALOG.healKeys(initialSettings);
 initialSettings = initialHeal.settings;
+/* Task 13 review fix: the load-time heal above used to happen silently – the
+   provider select could flip to a different provider on page load with no
+   explanation. Reuse settingsKeyNote (already rendered by renderSettingsPanel
+   for the paste-time heal) so this one is explained too. PROVIDER_LABELS isn't
+   built yet at this point in the file (it's derived from PROVIDERS below), so
+   read the label straight off the catalog. */
+var initialHealNote = initialHeal.healed ?
+  'Moved your ' + window.AI_MODEL_CATALOG.providers[initialHeal.healed.to].label + ' key and switched provider.' :
+  null;
 
 var App = {
   state: {
@@ -91,7 +100,7 @@ var App = {
                                            // a curated value and hide the custom row out from under the user
     settingsHighlight: false,             // true right after a blocked Start (missing key)
     settingsError: null,                  // message shown in the settings panel
-    settingsKeyNote: null,                // Task 13: info note shown after a paste-time auto-heal moved a key
+    settingsKeyNote: initialHealNote,     // Task 13: info note shown after a paste- or load-time auto-heal moved a key
     runError: null,                       // judge-failure message shown while phase === 'paused'
     generation: 0,
     population: null,      // array of 9 genomes, current generation
@@ -534,8 +543,11 @@ function judge(provider, model, key, photoDataUrl, gridDataUrl) {
    chars) instead of the raw JSON fragment the three adapters used to dump
    straight into the paused status. Falls back to the raw body (still truncated)
    when it isn't JSON or has no message field, so a non-JSON error page still
-   produces something readable. Never includes the API key – the key is never
-   part of a response body, so there is nothing to redact here. */
+   produces something readable. The API key is NOT guaranteed absent from this
+   text – OpenAI's 401 body echoes the submitted key back partially masked
+   (e.g. "Incorrect API key provided: AIzaSyD8***...WxYz..."), so the extracted
+   detail is run through window.AI_MODEL_CATALOG.redactKeys() before it's ever
+   returned, swapping any token that looks like a key for '<key>'. */
 function extractErrorMessage(label, status, rawBody) {
   var detail = rawBody;
   try {
@@ -551,7 +563,10 @@ function extractErrorMessage(label, status, rawBody) {
   } catch (e) {
     // not JSON – fall back to the raw body below
   }
-  return label + ' request failed (' + status + '): ' + String(detail).slice(0, 200);
+  detail = window.AI_MODEL_CATALOG.redactKeys(String(detail));
+  var truncated = detail.length > 200;
+  var shown = detail.slice(0, 200) + (truncated ? '…' : '');
+  return label + ' request failed (' + status + '): ' + shown;
 }
 
 function judgeGemini(model, key, photoDataUrl, gridDataUrl) {
@@ -1509,6 +1524,7 @@ function onStartClick() {
     runError: null,
     settingsHighlight: false,
     settingsError: null,
+    settingsKeyNote: null,
   });
   beginJudging();
 }
@@ -1654,11 +1670,13 @@ function onKeyChange(value) {
   if (value) {
     var likely = window.AI_MODEL_CATALOG.keyLooksLike(value);
     if (likely && likely !== provider && !keys[likely]) {
+      var originalProviderLabel = PROVIDER_LABELS[provider];
       keys[likely] = value;
       keys[provider] = '';
       provider = likely;
       note = 'That looks like a ' + PROVIDER_LABELS[likely] + ' key - stored it for ' +
-        PROVIDER_LABELS[likely] + ' and switched provider.';
+        PROVIDER_LABELS[likely] + ' and switched provider. Paste it again here to keep it under ' +
+        originalProviderLabel + '.';
     }
   }
 
