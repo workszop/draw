@@ -191,8 +191,6 @@ body.edu { background: var(--paper); color: var(--ink); font-family: var(--font-
 .photo-preview { margin-top: 12px; }
 .photo-preview img { display: block; width: 100%; height: auto; border-radius: var(--r-sm); border: 1px solid var(--line); background: var(--paper-2); }
 
-.settings-placeholder { color: var(--ink-3); font-size: 0.82rem; line-height: 1.5; }
-
 .settings-panel { transition: border-color 0.2s, box-shadow 0.2s; }
 .settings-panel.is-highlighted { border-color: var(--marigold); box-shadow: var(--focus-ring); }
 .settings-row { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }

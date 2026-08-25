@@ -1,10 +1,9 @@
 /* ============================================================
    APP – DrawMe UI. Classic script (no modules).
    Drives a plain state object; every UI change re-renders from state.
-   Task 4 scope: shell, grid, state machine skeleton, DOM contract.
-   The full GA run loop (judging, elitism, mutation wiring) lands in Task 5;
-   Pause/Resume/Stop here are minimal placeholders so the state machine and
-   DOM contract are exercisable before that loop exists.
+   Runs the full app: photo intake, the grid/state machine, the GA run loop
+   (AI judging with retry/failure handling, elitism, mutation), the review
+   countdown with Pause/Resume/Stop, run logging, and the done screen.
 
    Wrapped in an IIFE so the 25+ helper/constant names below stay private;
    only window.App is meant to escape this scope.
@@ -42,7 +41,7 @@ function providerMap(valueFactory) {
   PROVIDERS.forEach(function (p) { m[p] = valueFactory(); });
   return m;
 }
-var MAX_HINTS_REQUESTED = 4;             // prompt-side cap; the sanitizer itself does not truncate the list
+var MAX_HINTS_REQUESTED = 4;             // prompt-side cap; genome.js's sanitizer also truncates to this (MAX_SANITIZED_HINTS)
 
 // ─── Constants: log thumbnails (Task 9) ───
 
@@ -757,6 +756,7 @@ function runJudge(attempt, epoch) {
       handleJudgeFailure(attempt, epoch, 'The judge reply could not be understood.');
       return;
     }
+    startReviewTimer();
     App.set({
       winner: parsed.best,
       winnerSource: 'ai',
@@ -764,7 +764,6 @@ function runJudge(attempt, epoch) {
       phase: 'reviewing',
       runError: null,
     });
-    startReviewTimer();
   }).catch(function (err) {
     if (epoch !== judgeEpoch || App.state.phase !== 'judging') return; // stale – a newer run/generation moved on
     handleJudgeFailure(attempt, epoch, (err && err.message) ? err.message : 'The judge request failed.');
@@ -1591,12 +1590,12 @@ function onCellPick(index) {
   // only the winner + its source change, winnerHints is left untouched. A pick made
   // while paused (spec §6 manual-continue) also clears the judge-failure message,
   // since the user has now done exactly what it asked for.
+  if (s.phase === 'reviewing') startReviewTimer(); // (re)start the full REVIEW_MS window on every pick, including overrides
   App.set({
     winner: index,
     winnerSource: 'manual',
     runError: s.phase === 'paused' ? null : s.runError,
   });
-  if (s.phase === 'reviewing') startReviewTimer(); // (re)start the full REVIEW_MS window on every pick, including overrides
 }
 
 function onStartOverClick() {
