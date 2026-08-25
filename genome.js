@@ -143,6 +143,9 @@
   });
   var REF_HALF_W = MAX_HEAD_W * MAX_SHAPE_W * 1.55;
   var REF_HALF_H = MAX_HEAD_W * MAX_HEAD_RATIO * MAX_SHAPE_H * 1.6;
+  /* How much small heads are enlarged toward filling their cell (see renderGenome):
+     0 keeps fully truthful relative sizes, 1 restores the old uniform full-fill. */
+  var SIZE_EVENING = 0.6;
 
   var GENES = {
     age:         { type: 'cat', values: AGES, ordered: true },
@@ -1958,8 +1961,20 @@
        size and shape. Against a fixed reference a long face is genuinely taller in
        the cell, a narrow one genuinely narrower, and a child's head genuinely small.
        The reference is the largest head the genome space allows (see REF_HALF_W/H),
-       so the old fit behaviour is exactly the upper bound – nothing can overflow. */
-    var k = Math.min(w / (2 * REF_HALF_W), h / (2 * REF_HALF_H)) * scale;
+       so the old fit behaviour is exactly the upper bound – nothing can overflow.
+
+       SIZE_EVENING (user request): pure reference scaling left small heads (children,
+       petite faces) sitting tiny in their cells. Blend the truthful reference scale
+       toward this genome's own full-fill scale by SIZE_EVENING (0 = fully truthful
+       sizes, 1 = every face fills its cell like before). One shared k for both axes,
+       so the width:height ASPECT – what makes face shapes read – is never touched;
+       only the overall size range is compressed. */
+    var kRef = Math.min(w / (2 * REF_HALF_W), h / (2 * REF_HALF_H));
+    var sk = SHAPE_K[genome.faceShape] || SHAPE_K.oval;
+    var gHalfW = genome.headW * sk.w * 1.55;
+    var gHalfH = genome.headW * genome.headRatio * sk.h * 1.6;
+    var kFit = Math.min(w / (2 * gHalfW), h / (2 * gHalfH));
+    var k = kRef * Math.pow(kFit / kRef, SIZE_EVENING) * scale;
 
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, w, h);
