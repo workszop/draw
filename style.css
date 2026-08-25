@@ -150,10 +150,10 @@ body.edu { background: var(--paper); color: var(--ink); font-family: var(--font-
 
 #app {
   display: grid;
-  grid-template-columns: 280px minmax(0, 1fr) 300px;
+  grid-template-columns: 250px minmax(0, 1fr) 270px;
   gap: 18px;
   align-items: start;
-  max-width: 1400px;
+  max-width: 1420px; /* sized so the 4x3 grid's bottom lands level with the settings (AI) panel's bottom */
   margin: 0 auto;
   padding: 18px 24px 12px;
   min-height: calc(100vh - 62px);
