@@ -2024,8 +2024,20 @@
 
   /* renderGenome(canvas, genome, scale) – clear to the paper colour and draw the
      face centred, scaled so head + hair margin fits the canvas. */
-  function renderGenome(canvas, genome, scale) {
+  /* renderGenome(canvas, genome, scale, options) – options.transparent skips the paper
+     background fill, leaving everything the drawing never touched at alpha 0 (for the
+     transparent PNG export). Everything else is identical, and both extra arguments are
+     optional, so every existing 2- and 3-argument call site is unaffected.
+
+     The face itself still comes out solid: pen.js fills the head with pen.base (an
+     opaque near-white) before anything is drawn inside it, so only the area OUTSIDE the
+     drawing is transparent. The one visible difference is colour washes, which are
+     composited with 'multiply' – multiply against a transparent destination produces
+     nothing, so any part of a wash that strays outside the head silhouette disappears
+     instead of tinting the paper. Inside the head (over pen.base) washes are unchanged. */
+  function renderGenome(canvas, genome, scale, options) {
     scale = scale === undefined ? 1 : scale;
+    var transparent = !!(options && options.transparent);
     var ctx = canvas.getContext('2d');
     var w = canvas.width, h = canvas.height;
     /* The scale comes from a FIXED reference head, not from this genome's own rx/ry.
@@ -2052,8 +2064,10 @@
 
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, w, h);
-    ctx.fillStyle = C().PAPER;
-    ctx.fillRect(0, 0, w, h);
+    if (!transparent) {
+      ctx.fillStyle = C().PAPER;
+      ctx.fillRect(0, 0, w, h);
+    }
 
     ctx.save();
     ctx.translate(w / 2, h / 2);

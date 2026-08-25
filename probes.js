@@ -31,7 +31,10 @@
 
   // ─── Run ───
 
-  /* probe 1 (§7): rendering one genome twice must give byte-identical pixels */
+  /* probe 1 (§7): rendering one genome twice must give byte-identical pixels. Also
+     checks the transparent render option in the same breath, since it is the same call
+     with one flag: a default render's corner pixel is opaque paper (alpha 255), the
+     transparent one's is fully clear (alpha 0). */
   function determinism() {
     var g = window.Genome.repair(PROBE_GENOME);
     var a = probeCanvas(PROBE_W, PROBE_H);
@@ -39,11 +42,24 @@
     window.Genome.renderGenome(a, g);
     window.Genome.renderGenome(b, g);
     var da = a.toDataURL(), db = b.toDataURL();
+    var same = da === db;
+
+    var clear = probeCanvas(PROBE_W, PROBE_H);
+    window.Genome.renderGenome(clear, g, 1, { transparent: true });
+    function cornerAlpha(canvas) {
+      return canvas.getContext('2d').getImageData(1, 1, 1, 1).data[3];
+    }
+    var opaqueAlpha = cornerAlpha(a), clearAlpha = cornerAlpha(clear);
+    var alphaOk = opaqueAlpha === 255 && clearAlpha === 0;
+
     return {
-      pass: da === db,
-      detail: da === db
-        ? 'identical dataURL (' + da.length + ' chars), genome ' + window.Genome.genomeHash(g)
-        : 'dataURLs differ (' + da.length + ' vs ' + db.length + ' chars)',
+      pass: same && alphaOk,
+      detail: !same
+        ? 'dataURLs differ (' + da.length + ' vs ' + db.length + ' chars)'
+        : !alphaOk
+          ? 'corner alpha was ' + opaqueAlpha + ' (default) / ' + clearAlpha + ' (transparent), expected 255/0'
+          : 'identical dataURL (' + da.length + ' chars), corner alpha 255 default / 0 transparent, genome ' +
+            window.Genome.genomeHash(g),
     };
   }
 
@@ -396,7 +412,7 @@
 
   /* every check carries its descriptive name, so a thrower still reports under it */
   var CHECKS = [
-    { name: 'determinism: same genome renders identically', fn: determinism },
+    { name: 'determinism: same genome renders identically, and transparent mode drops the background', fn: determinism },
     { name: 'repair validity: 500 mutations all repair-idempotent', fn: repairValidity },
     { name: 'stratification: 50 initialPopulation() calls satisfy §3.5', fn: stratification },
     { name: 'diversity: 9 members, no winner copy, 6/3 split, >=5/6 mutants differ across 3 generations', fn: diversity },

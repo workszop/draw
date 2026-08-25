@@ -346,15 +346,16 @@ body.edu { background: var(--paper); color: var(--ink); font-family: var(--font-
 }
 .log-entry-text { flex: 1 1 auto; min-width: 0; }
 
-.done-panel { display: flex; flex-direction: column; gap: 16px; }
-.done-portrait, .done-composite { margin: 0; }
-.done-portrait img, .done-composite img {
-  display: block; max-width: 100%; height: auto;
+/* the done screen shows the finished drawing and nothing else; the side-by-side view
+   is a download only, so .done-composite has no page styling left to carry. */
+.done-panel { display: flex; flex-direction: column; gap: 16px; align-items: center; }
+.done-panel h2 { align-self: flex-start; }
+.done-portrait { margin: 0; }
+.done-portrait img {
+  display: block; max-width: 100%; width: min(100%, 460px); height: auto;
   border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--paper-2);
 }
-.done-portrait figcaption, .done-composite figcaption { margin-top: 6px; font-size: 0.78rem; color: var(--ink-2); }
-.done-status { color: var(--ink-3); font-size: 0.82rem; }
-.done-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.done-actions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; }
 .done-actions a.edu-btn { text-decoration: none; display: inline-flex; align-items: center; }
 .done-actions .is-disabled { opacity: 0.45; pointer-events: none; }
 

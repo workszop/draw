@@ -169,7 +169,8 @@ var App = {
     error: null,
     photo: null,             // { previewUrl, jpegDataUrl, width, height } | null
     doneGenome: null,        // final winner genome, set on state 'done'
-    portraitDataUrl: null,   // 2x-rendered final portrait PNG, set on state 'done'
+    portraitDataUrl: null,   // 2x-rendered final portrait PNG (paper background), shown on state 'done'
+    portraitTransparentDataUrl: null, // the same 2x portrait with NO background – download option 1
     compositeDataUrl: null,  // photo+portrait side-by-side PNG, built async on state 'done'
   },
   population: null,          // mirrors state.population for the DOM contract (§7)
@@ -902,14 +903,17 @@ function handleJudgeFailure(attempt, epoch, message) {
   App.set({ phase: 'paused', runError: message + ' Pick manually to continue.' });
 }
 
-/* buildPortraitCanvas(genome) -> canvas rendered at 2x cell resolution. renderGenome
-   scales its strokes to the canvas it is given, so a bigger canvas re-renders sharper
-   strokes rather than upscaling pixels of a smaller render. */
-function buildPortraitCanvas(genome) {
+/* buildPortraitCanvas(genome, transparent) -> canvas rendered at 2x cell resolution.
+   renderGenome scales its strokes to the canvas it is given, so a bigger canvas
+   re-renders sharper strokes rather than upscaling pixels of a smaller render.
+   `transparent` drops the paper background (see renderGenome's options) for the
+   transparent-PNG download; the on-screen portrait and the side-by-side composite both
+   use the opaque render, since both are shown against paper. */
+function buildPortraitCanvas(genome, transparent) {
   var canvas = document.createElement('canvas');
   canvas.width = CELL_W * 2;
   canvas.height = CELL_H * 2;
-  window.Genome.renderGenome(canvas, genome);
+  window.Genome.renderGenome(canvas, genome, 1, { transparent: !!transparent });
   return canvas;
 }
 
@@ -968,6 +972,8 @@ function finishRun(winnerIndex, entry, extraEntries) {
   var genome = entry.genome || s.population[winnerIndex - 1];
   var portraitCanvas = buildPortraitCanvas(genome);
   var portraitDataUrl = portraitCanvas.toDataURL('image/png');
+  // the download the user actually gets for "drawing only": same render, no paper
+  var portraitTransparentDataUrl = buildPortraitCanvas(genome, true).toDataURL('image/png');
 
   App.set({
     state: 'done',
@@ -976,6 +982,7 @@ function finishRun(winnerIndex, entry, extraEntries) {
     winnerSource: entry.source,
     doneGenome: genome,
     portraitDataUrl: portraitDataUrl,
+    portraitTransparentDataUrl: portraitTransparentDataUrl,
     compositeDataUrl: null,
     runError: null,
     log: s.log.concat([entry]).concat(extraEntries || []),
@@ -1518,40 +1525,37 @@ function renderDoneCenter(s) {
   var panel = el('div', { class: 'panel done-panel' });
   panel.appendChild(el('h2', { text: 'Done – step ' + s.generation + ' of ' + STEP_COUNT }));
 
+  /* the finished drawing, and only the drawing: the side-by-side view is no longer
+     shown on the page, it lives on purely as the second download below. */
   var portraitFig = el('figure', { class: 'done-portrait' });
-  var portraitImg = el('img', { alt: 'Final evolved portrait' });
+  var portraitImg = el('img', { alt: 'The finished drawing' });
   portraitImg.src = s.portraitDataUrl;
   portraitFig.appendChild(portraitImg);
-  portraitFig.appendChild(el('figcaption', { text: 'Final portrait (2x)' }));
   panel.appendChild(portraitFig);
-
-  var compFig = el('figure', { class: 'done-composite' });
-  if (s.compositeDataUrl) {
-    var compImg = el('img', { alt: 'Photo and final portrait side by side' });
-    compImg.src = s.compositeDataUrl;
-    compFig.appendChild(compImg);
-    compFig.appendChild(el('figcaption', { text: 'Photo vs. portrait' }));
-  } else {
-    compFig.appendChild(el('p', { class: 'done-status', text: 'Building side-by-side composite…' }));
-  }
-  panel.appendChild(compFig);
 
   var actions = el('div', { class: 'done-actions' });
 
+  /* option 1: the drawing on its own, background dropped (see buildPortraitCanvas).
+     The preview above deliberately stays the opaque render – it is displayed against
+     the panel's own paper, where a transparent PNG would look identical anyway. */
   var portraitLink = el('a', {
-    class: 'edu-btn', download: 'drawme-portrait.png', text: 'Download portrait PNG',
+    class: 'edu-btn', download: 'drawme-portrait-transparent.png',
+    text: 'Download drawing (transparent PNG)',
   });
-  portraitLink.href = s.portraitDataUrl;
+  portraitLink.href = s.portraitTransparentDataUrl || s.portraitDataUrl;
   actions.appendChild(portraitLink);
 
+  // option 2: photo and drawing side by side, on paper – built async, so it can still
+  // be a moment behind the rest of the done screen
   var compositeLink = el('a', {
-    class: 'edu-btn ghost', download: 'drawme-side-by-side.png', text: 'Download side-by-side PNG',
+    class: 'edu-btn ghost', download: 'drawme-side-by-side.png', text: 'Download photo + drawing',
   });
   if (s.compositeDataUrl) {
     compositeLink.href = s.compositeDataUrl;
   } else {
     compositeLink.classList.add('is-disabled');
     compositeLink.setAttribute('aria-disabled', 'true');
+    compositeLink.textContent = 'Download photo + drawing (preparing…)';
   }
   actions.appendChild(compositeLink);
 
@@ -1774,16 +1778,19 @@ function cellKeyIndex(key) {
 }
 
 /* triggerPortraitDownload() (Task 7): what the "s" keyboard shortcut does on the done
-   screen – the same download the visible "Download portrait PNG" link performs, fired
-   programmatically since that link is rebuilt fresh on every render and has no stable
-   ref to click(). A no-op if there is no portrait yet (state !== 'done' is already
-   checked by the caller, but the data URL is checked again here as a hard guard). */
+   screen – the same download the visible "Download drawing (transparent PNG)" link
+   performs, fired programmatically since that link is rebuilt fresh on every render and
+   has no stable ref to click(). Falls back to the opaque portrait only if the
+   transparent render somehow isn't there. A no-op if there is no portrait at all
+   (state !== 'done' is already checked by the caller, but the data URL is checked again
+   here as a hard guard). */
 function triggerPortraitDownload() {
   var s = App.state;
-  if (!s.portraitDataUrl) return;
+  var href = s.portraitTransparentDataUrl || s.portraitDataUrl;
+  if (!href) return;
   var link = document.createElement('a');
-  link.href = s.portraitDataUrl;
-  link.download = 'drawme-portrait.png';
+  link.href = href;
+  link.download = s.portraitTransparentDataUrl ? 'drawme-portrait-transparent.png' : 'drawme-portrait.png';
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
@@ -1817,7 +1824,7 @@ function onStartOverClick() {
   App.set({
     state: 'ready', phase: null, population: null, populationMeta: null, generation: 0,
     winner: null, winnerSource: null, winnerHints: [], workingGenome: null, runError: null, log: [], error: null,
-    doneGenome: null, portraitDataUrl: null, compositeDataUrl: null,
+    doneGenome: null, portraitDataUrl: null, portraitTransparentDataUrl: null, compositeDataUrl: null,
   });
   onStartClick();
 }
@@ -1830,7 +1837,7 @@ function onNewPhotoClick() {
   App.set({
     state: 'idle', phase: null, population: null, populationMeta: null, generation: 0,
     winner: null, winnerSource: null, winnerHints: [], workingGenome: null, runError: null, log: [], error: null, photo: null,
-    doneGenome: null, portraitDataUrl: null, compositeDataUrl: null,
+    doneGenome: null, portraitDataUrl: null, portraitTransparentDataUrl: null, compositeDataUrl: null,
   });
 }
 
