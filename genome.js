@@ -46,8 +46,37 @@
      shapeJaw() the plan's oval (0.95) and round (1.0) came out ≤2.5% apart at the chin,
      which is invisible. Widening the spread (rather than steepening the ramp) keeps the
      silhouette's smooth taper while making each shape name readable on the page. */
-  var JAW_K = { oval: 0.92, round: 1.0, long: 1.0, heart: 0.78, square: 1.10 };
+  var JAW_K = { oval: 0.90, round: 1.0, long: 1.0, heart: 0.74, square: 1.14 };
+  /* SHAPE_K – per-shape head proportions, applied to rx/ry in drawFace. Without these
+     'round' and 'long' were the SAME drawing (both jawK 1.0), separated only by the
+     independent headRatio gene – which is why every face came out looking round
+     whatever shape it claimed. Now the name itself stretches or squashes the head, and
+     headRatio varies around that instead of carrying the whole burden. */
+  var SHAPE_K = {
+    oval:   { w: 1.00, h: 1.00 },
+    round:  { w: 1.07, h: 0.88 },
+    long:   { w: 0.93, h: 1.16 },
+    heart:  { w: 1.03, h: 1.00 },
+    square: { w: 1.05, h: 0.95 },
+  };
+  var MAX_SHAPE_W = 1, MAX_SHAPE_H = 1;
+  Object.keys(SHAPE_K).forEach(function (k) {
+    if (SHAPE_K[k].w > MAX_SHAPE_W) MAX_SHAPE_W = SHAPE_K[k].w;
+    if (SHAPE_K[k].h > MAX_SHAPE_H) MAX_SHAPE_H = SHAPE_K[k].h;
+  });
+  /* how sharply the jaw scale ramps in below the eye line. Below 1 the ramp bites
+     early, so the shape is already visible across the cheeks instead of only pinching
+     the last few points at the chin – with the old linear ramp the five shapes were
+     nearly indistinguishable at cell size. */
+  var JAW_RAMP = 0.6;
   /* ranges for the Phase 9 float genes, one place so GENES/repair/mutate agree */
+  /* 'young' rendering cues (see drawFace). Kept here with the other tuned constants so
+     they can be dialled from one place rather than hunted through the drawing code. */
+  var YOUNG_NOSE_K = 0.82;    // shorter nose
+  var YOUNG_EYE_K = 1.14;     // larger eyes
+  var YOUNG_MOUTH_GAP_K = 0.9; // shorter nose-to-mouth gap – a compact mid-face reads young
+  var YOUNG_BLUSH_P = 0.7;    // blush chance on a child/soft face (0.45 at other ages)
+
   var EAR_SIZE_RANGE = [0.8, 1.35];
   var NOSE_SIZE_RANGE = [0.7, 1.4];
   var MOUTH_SIZE_RANGE = [0.7, 1.3];
@@ -101,6 +130,20 @@
   }
 
   /* GENES: one descriptor per gene, so mutate/hints (later tasks) can walk the table. */
+  /* REF_HALF_W / REF_HALF_H – the fixed marker box renderGenome() fits every portrait
+     into: the widest head any genome can carry, and the tallest, each with the usual
+     hair/hat margin. Derived from the age ranges rather than hardcoded so a widened
+     headW/headRatio range can never quietly start clipping heads. Because both maxima
+     are taken independently, the box is at least as large as any single genome needs. */
+  var MAX_HEAD_W = 0, MAX_HEAD_RATIO = 0;
+  AGES.forEach(function (age) {
+    var hw = headWRange(age), hr = headRatioRange(age);
+    if (hw[1] > MAX_HEAD_W) MAX_HEAD_W = hw[1];
+    if (hr[1] > MAX_HEAD_RATIO) MAX_HEAD_RATIO = hr[1];
+  });
+  var REF_HALF_W = MAX_HEAD_W * MAX_SHAPE_W * 1.55;
+  var REF_HALF_H = MAX_HEAD_W * MAX_HEAD_RATIO * MAX_SHAPE_H * 1.6;
+
   var GENES = {
     age:         { type: 'cat', values: AGES, ordered: true },
     gender:      { type: 'cat', values: GENDERS },
@@ -883,7 +926,12 @@
      texture) and in STYLE_GENES (the pen/ink/wash the sketch is drawn with) – never
      in another element's identity genes. */
   var ELEMENT_STEPS = [
-    { id: 'persona',     label: 'age and gender',              genes: ['age', 'gender'] },
+    /* must: combinations that have to be on the panel no matter how the mixed-radix
+       walk falls. 4 ages x 3 genders is 12 combos for 8 slots, so young-fem and
+       young-masc – the ones users most often want and the ones the old renderer made
+       look middle-aged – used to be droppable at random. They are not any more. */
+    { id: 'persona',     label: 'age and gender',              genes: ['age', 'gender'],
+      must: [{ age: 'young', gender: 'fem' }, { age: 'young', gender: 'masc' }] },
     { id: 'face',        label: 'face shape and skin tone',    genes: ['faceShape', 'headW', 'headRatio', 'skinIdx'] },
     { id: 'hair',        label: 'hair',                        genes: ['hairStyle', 'hairDark', 'hairFillIdx', 'hairTintIdx'] },
     { id: 'eyes',        label: 'eyes and eyebrows',           genes: ['eyeKind', 'eyeSize', 'eyeGap', 'browKind', 'look'] },
@@ -1078,7 +1126,56 @@
       out.push(chosen);
     }
 
+    applyMustCombos(out, baseG, stepDef);
     return out;
+  }
+
+  /* applyMustCombos(variants, baseG, stepDef) – guarantees every combination listed in
+     stepDef.must appears somewhere on the panel, overwriting one alternative slot per
+     missing combo (never candidate 1, the "keep as is" anchor, and never a slot already
+     claimed by another must). The replacement is built from the BASE genome with the
+     must's genes stamped on, carrying over only the overwritten slot's style genes and
+     wobbleSeed – so it still looks like part of the same sketch panel while keeping the
+     same "outside the step, only style/seed/repair-consequences may differ" contract
+     the rest of the panel obeys. (Inheriting the old occupant's genes instead would
+     drag ITS repair consequences – a masc slot's suppressed earrings, say – onto a fem
+     combo that never asked for them.) Slots are claimed from the back, so the
+     mixed-radix spread at the front of the panel survives intact. Mutates the array it
+     is handed, which is the freshly built local `out` – never a caller's object. */
+  function applyMustCombos(variants, baseG, stepDef) {
+    var must = stepDef.must;
+    if (!Array.isArray(must) || !must.length) return;
+    var claimed = {};
+    for (var m = 0; m < must.length; m++) {
+      var combo = must[m];
+      var present = false, i;
+      for (i = 0; i < variants.length; i++) {
+        if (matchesCombo(variants[i], combo)) { present = true; break; }
+      }
+      if (present) continue;
+      var slot = -1;
+      for (i = variants.length - 1; i >= 1; i--) {
+        if (!claimed[i]) { slot = i; break; }
+      }
+      if (slot < 0) return;                       // more musts than slots – leave the panel alone
+      claimed[slot] = true;
+      var cand = {};
+      for (var k = 0; k < GENE_NAMES.length; k++) cand[GENE_NAMES[k]] = baseG[GENE_NAMES[k]];
+      for (i = 0; i < STYLE_GENES.length; i++) cand[STYLE_GENES[i]] = variants[slot][STYLE_GENES[i]];
+      cand.wobbleSeed = variants[slot].wobbleSeed;
+      for (var gene in combo) {
+        if (Object.prototype.hasOwnProperty.call(combo, gene)) cand[gene] = combo[gene];
+      }
+      variants[slot] = repair(cand);
+    }
+  }
+
+  function matchesCombo(genome, combo) {
+    for (var gene in combo) {
+      if (!Object.prototype.hasOwnProperty.call(combo, gene)) continue;
+      if (genome[gene] !== combo[gene]) return false;
+    }
+    return true;
   }
 
   // ─── Render: the marker box, resolved lazily so genome.js loads without a DOM ───
@@ -1115,7 +1212,7 @@
       var x = pts[i][0], y = pts[i][1];
       var t = (y - cy) / ry;                     // 0 at the eye line, 1 at the chin
       t = t < 0 ? 0 : t > 1 ? 1 : t;
-      out.push([cx + (x - cx) * (1 + (jawK - 1) * t), y]);
+      out.push([cx + (x - cx) * (1 + (jawK - 1) * Math.pow(t, JAW_RAMP)), y]);
     }
     return out;
   }
@@ -1487,6 +1584,7 @@
 
   /* ----- eyes ----- */
   function faceEyes(F) {
+    var youngEye = F.isYoung ? YOUNG_EYE_K : 1;   // young eyes read a little larger
     var exL = F.exL, exR = F.exR, expr = F.expr, eyeY = F.eyeY, isChild = F.isChild, isOld = F.isOld,
       look = F.look, soft = F.soft;
     var eyeKind = F.eyeKind;                     // gene; the expr ladder still applies on top
@@ -1504,7 +1602,7 @@
     function noteR(r) { if (r > F.eyeR) F.eyeR = r; return r; }
 
     function eye(x, kind, s, side) {
-      if (kind === 'dot') { dot(x, eyeY, noteR(rf(2, 3.2) * (isChild ? 1.3 : 1) * eyeSize)); return; }
+      if (kind === 'dot') { dot(x, eyeY, noteR(rf(2, 3.2) * (isChild ? 1.3 : 1) * youngEye * eyeSize)); return; }
       if (kind === 'wink') { arc(x, eyeY, noteR(rf(5, 8) * eyeSize), 0.15, Math.PI - 0.15, { width: 2 }); return; }
       var r;
       if (kind === 'closed') {
@@ -1514,7 +1612,7 @@
         /* clamped just under the half-gap: at eyeSize 1.3 with eyeGap 0.85 a 'big' eye
            could otherwise reach past cx and the two eyes would overlap on the midline.
            The clamp is applied AFTER the roll, so the RNG stream is untouched. */
-        r = noteR(Math.min((kind === 'big' ? rf(10, 16) : rf(5.5, 9)) * s * (isOld ? 0.85 : 1) * eyeSize, gap * 0.9));
+        r = noteR(Math.min((kind === 'big' ? rf(10, 16) : rf(5.5, 9)) * s * (isOld ? 0.85 : 1) * youngEye * eyeSize, gap * 0.9));
         arc(x, eyeY, r, 0, Math.PI * 2, { width: 1.8, wob: 0.9 });
         var px = x + look * r * 0.35 + rf(-1, 1), py = eyeY + rf(-1, 2);
         dot(px, py, Math.max(1.6, r * (isChild ? rf(0.35, 0.5) : rf(0.22, 0.4))));
@@ -1548,7 +1646,10 @@
     if (browKind !== 'none') {
       var lift = browKind === 'raised' ? 8 : soft > 0.5 ? 3 : 0;
       var by = eyeY - rf(11, 18) - lift;
-      var bw = browKind === 'thick' || browKind === 'bushy' ? rf(3, 5) : soft > 0.5 ? 1.6 : 2;
+      /* a soft persona already draws a thinner brow; a YOUNG soft persona gets it even
+         at the neutral soft weight, which is a large part of reading as young */
+      var thinBrow = soft > 0.5 || (F.isYoung && soft > 0);
+      var bw = browKind === 'thick' || browKind === 'bushy' ? rf(3, 5) : thinBrow ? 1.6 : 2;
       [[exL, -1], [exR, 1]].forEach(function (pair) {
         var ex = pair[0], s = pair[1];
         if (browKind !== 'angry' && !chance(0.8)) return;
@@ -1564,7 +1665,8 @@
     var cx = F.cx, eyeY = F.eyeY, isChild = F.isChild, look = F.look, ry = F.ry, shift = F.shift;
     var noseKind = F.noseKind;                   // gene (repair keeps 'big' for old faces only)
     var nx = cx + shift * 1.4, nTop = eyeY + rf(2, 8);
-    var nLen = ry * (isChild ? rf(0.14, 0.24) : rf(0.22, 0.4)) * (noseKind === 'big' ? 1.2 : 1) * F.noseSize;   // noseSize gene
+    var nLen = ry * (isChild ? rf(0.14, 0.24) : rf(0.22, 0.4)) * (noseKind === 'big' ? 1.2 : 1) *
+      (F.isYoung ? YOUNG_NOSE_K : 1) * F.noseSize;   // noseSize gene; young noses read shorter
     var hookDir = pick([-1, 1]);
     var hook = hookDir * rf(4, 12) * (noseKind === 'big' ? 1.5 : 1) + look * 6;
     if (noseKind === 'button') {
@@ -1585,7 +1687,7 @@
   function faceMouth(F) {
     var cx = F.cx, cy = F.cy, expr = F.expr, isChild = F.isChild, isOld = F.isOld, nLen = F.nLen,
       nTop = F.nTop, rx = F.rx, ry = F.ry, shift = F.shift, soft = F.soft;
-    var mY = nTop + nLen + rf(12, 20) * (isChild ? 0.85 : 1);
+    var mY = nTop + nLen + rf(12, 20) * (isChild ? 0.85 : F.isYoung ? YOUNG_MOUTH_GAP_K : 1);
     var mx = cx + shift;
     var mS = (isChild ? 0.75 : 1) * F.mouthSize;   // mouth scale, mouthSize gene on top
     var mouthKind = F.mouthKind;                 // gene; the expr ladder still applies on top
@@ -1681,7 +1783,7 @@
         sketch([[cx + s * rx * 0.62 + shift * 0.5, cy + ry * 0.25], [cx + s * rx * 0.66 + shift * 0.5, cy + ry * 0.45], [cx + s * rx * 0.58 + shift * 0.5, cy + ry * 0.62]], fine);
       });
       if (chance(0.4) && beard === 'none') arc(mx, mY + 24, 8, Math.PI * 1.2, Math.PI * 1.8, fine);   // chin crease
-    } else if (age === 'adult' && chance(0.25)) {
+    } else if (age === 'adult' && chance(0.25)) {   // adult only – a young face never gets age lines
       [-1, 1].forEach(function (s) { sketch([[nx + s * 9, nTop + nLen + 2], [mx + s * 14, mY + 2]], fine); });
     }
   }
@@ -1690,7 +1792,7 @@
   function faceCheeks(F) {
     var exL = F.exL, exR = F.exR, eyeY = F.eyeY, isChild = F.isChild, mY = F.mY, soft = F.soft;
     if (chance(isChild ? 0.35 : 0.12)) { stipple(exL - 6, mY - 14, 9, 6, ri(4, 8), 0.8); stipple(exR + 6, mY - 14, 9, 6, ri(4, 8), 0.8); }
-    if ((isChild || soft > 0) && chance(0.45)) {
+    if ((isChild || soft > 0) && chance(F.isYoung ? YOUNG_BLUSH_P : 0.45)) {
       var cyk = eyeY + (mY - eyeY) * 0.55;
       if (chance(0.6)) {                            // a dab of marker on each cheek
         washPts(blobPts(exL - 9, cyk + 1, 9, 6, 0.1, 10), { color: C().BLUSH, alpha: rf(0.35, 0.6), grow: 1 });
@@ -1760,6 +1862,12 @@
     /* ----- who is this? ----- */
     var age = g.age, gender = g.gender, expr = g.expr;
     var isChild = age === 'child', isOld = age === 'old';
+    /* 'young' used to render exactly like 'adult' – nothing in the drawing branched on
+       it – so a young face read as middle-aged, worst of all a young feminine one.
+       It now carries its own cues: eyes a touch lower and larger, a shorter nose,
+       thinner brows on a soft persona, more blush, and (as before, but now explicitly)
+       never an age line. Everything random here still runs off wobbleSeed. */
+    var isYoung = age === 'young';
     var fem = gender === 'fem', masc = gender === 'masc';
     var soft = softOf(gender);                   // feminine styling weight
     var rough = roughOf(gender);                 // masculine styling weight
@@ -1776,13 +1884,18 @@
     var accent = { color: col.ACCENTS[g.accentIdx], alpha: 0.8 };
 
     /* ----- geometry ----- */
-    var rx = g.headW;                            // head half-width
-    var ry = rx * g.headRatio;                   // heads are a bit tall
+    /* faceShape stretches the head itself, not just its jaw: a round head is wider and
+       shorter, a long one narrower and taller (see SHAPE_K). headRatio then varies
+       around that, so shape and proportion are two visible dials instead of one. */
+    var shapeK = SHAPE_K[g.faceShape] || SHAPE_K.oval;
+    var rx = g.headW * shapeK.w;                 // head half-width
+    var ry = g.headW * g.headRatio * shapeK.h;   // heads are a bit tall
     var tilt = g.tilt;                           // whole head leans
     var look = g.look;                           // gaze: -1 left … 1 right
     var shift = look * rx * 0.18;                // features slide toward gaze
     var hairTop = cy - ry * (isOld && masc ? rf(0.45, 0.7) : isChild ? rf(0.3, 0.5) : rf(0.25, 0.45));
-    var eyeY = cy - ry * (isChild ? rf(-0.08, 0.04) : rf(0.02, 0.14));   // children carry their eyes lower
+    /* children carry their eyes lower in the head, adults higher; young sits between */
+    var eyeY = cy - ry * (isChild ? rf(-0.08, 0.04) : isYoung ? rf(-0.03, 0.08) : rf(0.02, 0.14));
     var gap = rx * (isChild ? rf(0.4, 0.52) : rf(0.34, 0.5)) * g.eyeGap;   // eyeGap gene: eyes apart/together
     var exL = cx - gap + shift, exR = cx + gap + shift;
     var partDir = pick([-1, 1]);
@@ -1804,7 +1917,7 @@
 
     // everything the parts need to know
     var F = {
-      cx: cx, cy: cy, age: age, gender: gender, isChild: isChild, isOld: isOld, fem: fem, masc: masc,
+      cx: cx, cy: cy, age: age, gender: gender, isChild: isChild, isOld: isOld, isYoung: isYoung, fem: fem, masc: masc,
       soft: soft, rough: rough, expr: expr, dark: dark, skinWash: skinWash, hairFill: hairFill,
       hairTint: hairTint, hatWash: hatWash, accent: accent, rx: rx, ry: ry, look: look, shift: shift,
       hairTop: hairTop, eyeY: eyeY, gap: gap, exL: exL, exR: exR, partDir: partDir, style: style,
@@ -1838,9 +1951,15 @@
     scale = scale === undefined ? 1 : scale;
     var ctx = canvas.getContext('2d');
     var w = canvas.width, h = canvas.height;
-    var rx = genome.headW, ry = rx * genome.headRatio;
-    var halfW = rx * 1.55, halfH = ry * 1.6;     // head plus the hair/hat margin around it
-    var k = Math.min(w / (2 * halfW), h / (2 * halfH)) * scale;
+    /* The scale comes from a FIXED reference head, not from this genome's own rx/ry.
+       Fitting each genome to the cell normalised away the very differences headW,
+       headRatio and faceShape exist to express: a long face was scaled down until it
+       filled the cell exactly like a round one, so every portrait came out the same
+       size and shape. Against a fixed reference a long face is genuinely taller in
+       the cell, a narrow one genuinely narrower, and a child's head genuinely small.
+       The reference is the largest head the genome space allows (see REF_HALF_W/H),
+       so the old fit behaviour is exactly the upper bound – nothing can overflow. */
+    var k = Math.min(w / (2 * REF_HALF_W), h / (2 * REF_HALF_H)) * scale;
 
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, w, h);
@@ -1878,6 +1997,7 @@
       GENE_NAMES: GENE_NAMES,
       DIRECTION_WORDS: DIRECTION_WORDS,
       JAW_K: JAW_K,
+      SHAPE_K: SHAPE_K,
       shapeJaw: shapeJaw,          // exposed so the jaw ramp can be measured without a canvas
       HAIR_VALID: HAIR_VALID,
       HAT_STYLES: HAT_STYLES,
