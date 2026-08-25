@@ -274,9 +274,11 @@ body.edu { background: var(--paper); color: var(--ink); font-family: var(--font-
   transition-property: width; transition-timing-function: linear;
 }
 
+/* 4 across x 3 down = the 12-cell panel (1 keep-as-is anchor + 8 element variants +
+   3 wild cards). Two columns on narrow screens, as before. */
 #grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
 }
 .cell {
@@ -298,6 +300,17 @@ body.edu { background: var(--paper); color: var(--ink); font-family: var(--font-
   font-family: var(--font-mono); font-size: 0.72rem; font-weight: 600;
   border-radius: var(--r-pill); padding: 1px 7px; border: 1px solid var(--line-2);
 }
+/* wild-card marker: a small spark opposite the number badge. Shown in the DOM only –
+   buildGridJpeg never draws it, so the judge cannot tell a wild card from a variant. */
+.cell .cell-wild {
+  position: absolute; top: 10px; right: 10px;
+  background: var(--teal-soft); color: var(--teal-ink);
+  font-size: 0.72rem; line-height: 1; font-weight: 700;
+  border-radius: var(--r-pill); padding: 3px 6px; border: 1px solid var(--teal);
+}
+.cell.is-wild { border-style: dashed; }
+.cell.is-wild:hover { border-color: var(--teal); }
+
 /* winner highlight (Task 7): an opacity fade, not a shape/position change – a new
    .is-winner cell is a freshly-rendered DOM node each time (render() rebuilds the
    whole grid), so this animation naturally replays on every new pick or override. */

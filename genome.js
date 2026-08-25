@@ -681,6 +681,7 @@
   // ─── Helpers: judge reply sanitizer (spec §4.3, Task 6) ───
 
   var MAX_HINT_SUGGESTION_CHARS = 80;
+  var DEFAULT_MAX_BEST = 9;         // sanitizeJudgeReply's historic grid size when no maxBest is given
   var MAX_SANITIZED_HINTS = 4;      // matches the prompt's "at most 4 hints" contract (spec §4.1)
 
   /* extractFirstJsonObject(text) -> the substring of the first balanced {...} block,
@@ -715,15 +716,21 @@
     return null;
   }
 
-  /* sanitizeJudgeReply(text) (spec §4.3) -> { best, hints } | null. Pure, Node-testable,
-     exposed on the Genome namespace (not just app.js) so probes and Node tests reach it
-     without a DOM. `best` must be an integer 1-9 or the WHOLE reply is rejected (null).
+  /* sanitizeJudgeReply(text, maxBest) (spec §4.3) -> { best, hints } | null. Pure,
+     Node-testable, exposed on the Genome namespace (not just app.js) so probes and Node
+     tests reach it without a DOM. `best` must be an integer from 1 to maxBest or the
+     WHOLE reply is rejected (null). maxBest defaults to 9 – the historic grid size, so
+     every existing caller and fixture keeps its exact behaviour – and the element loop
+     passes PANEL_SIZE (12) for its wider panel. A non-numeric or out-of-range maxBest
+     falls back to the default rather than widening the gate by accident.
      `hints` is filtered to the known HINT_MAP trait vocabulary, every suggestion is
      coerced to a string and truncated to 80 chars, and the list itself is capped at
      MAX_SANITIZED_HINTS (4), matching the prompt's "at most 4 hints" contract. Never
      eval's anything; callers must still render hints via textContent only, never
      innerHTML. */
-  function sanitizeJudgeReply(text) {
+  function sanitizeJudgeReply(text, maxBest) {
+    var limit = (typeof maxBest === 'number' && isFinite(maxBest) && maxBest >= 1)
+      ? Math.floor(maxBest) : DEFAULT_MAX_BEST;
     var block = extractFirstJsonObject(text);
     if (!block) return null;
     var obj;
@@ -731,7 +738,7 @@
     if (!obj || typeof obj !== 'object') return null;
 
     var best = obj.best;
-    if (typeof best !== 'number' || !isFinite(best) || Math.floor(best) !== best || best < 1 || best > 9) {
+    if (typeof best !== 'number' || !isFinite(best) || Math.floor(best) !== best || best < 1 || best > limit) {
       return null;
     }
 
@@ -944,7 +951,15 @@
     { id: 'details',     label: 'glasses, ears and accessories', genes: ['eyewear', 'earStyle', 'earSize', 'earrings', 'bow'] },
   ];
 
-  var VARIANT_COUNT = 9;              // candidates per step: 1 "keep as is" + 8 alternatives
+  var PANEL_SIZE = 12;                // cells per step: 1 "keep as is" + 8 element variants + 3 wild cards
+  var VARIANT_COUNT = 9;              // the anchor plus its 8 element variants (cells before shuffling in wild cards)
+  var WILD_COUNT = 3;                 // wild cards per panel – the local-minimum escape hatch
+  var WILD_REROLL_P = 0.35;           // chance each non-step, non-persona gene is re-rolled in a wild card
+  /* the persona is locked once the run has chosen it: from step 2 on, a wild card may
+     jump anywhere EXCEPT back into a different age or gender. Otherwise a wild card
+     would keep undoing the one decision the whole rest of the run is built on, which
+     is disorienting rather than useful – "on topic" is exactly this constraint. */
+  var PERSONA_GENES = ['age', 'gender'];
   var FLOAT_SAMPLES = 8;              // stratified samples a 'num' gene contributes to its value list
   var MAX_VARIANT_ATTEMPTS = 24;      // bounded rebuild budget per candidate (see elementVariants)
   var STYLE_P = 0.7;                  // per-candidate chance each STYLE_GENES entry is re-rolled
@@ -1051,17 +1066,24 @@
     }
   }
 
-  /* elementVariants(base, step, rand) -> 9 repaired genomes for one identikit step.
-     Pure: `base` is never mutated (every candidate is built from a fresh copy).
+  /* elementVariants(base, step, rand) -> { population, meta } for one identikit step:
+     PANEL_SIZE (12) repaired genomes and an aligned meta array of
+     'anchor' | 'variant' | 'wild'. Pure: `base` is never mutated (every candidate is
+     built from a fresh copy). Returns a pair rather than a bare array for the same
+     reason nextPopulation does – provenance the caller needs (which cells are wild
+     cards, for the badge) travels with the data instead of in shared state.
 
-     - candidate 1 is repair(base) itself – the exact face already on screen, the
-       "keep as is" anchor, with the base's own wobbleSeed and style genes intact;
-     - candidates 2-9 change that step's genes, and outside them may differ only in
+     - cell 1 is repair(base) itself – the exact face already on screen, the
+       "keep as is" anchor, with the base's own wobbleSeed and style genes intact.
+       It stays at cell 1 always; the other 11 are shuffled;
+     - 8 element variants change that step's genes, and outside them may differ only in
        wobbleSeed and STYLE_GENES (see below). Each step gene walks its far-from-base
        value list by a mixed-radix counter, so a big domain is sampled without
        replacement across the panel while a small one automatically combines with
        variation in the step's other genes;
-     - each of candidates 2-9 gets a FRESH wobbleSeed and independently re-rolls each
+     - 3 wild cards (see wildCard) jump much further, to keep a sequential run from
+       painting itself into a corner it cannot leave;
+     - each non-anchor candidate gets a FRESH wobbleSeed and independently re-rolls each
        STYLE_GENES entry with probability STYLE_P. This deliberately gives up the older
        "everything outside the element is pixel-identical" property: the panel is meant
        to look like nine sketches of the same person by an artist swapping pens, not
@@ -1072,7 +1094,7 @@
        is rebuilt from the next combination; the same retry covers a candidate that
        repairs into a duplicate of one already in the list. The budget is bounded
        (MAX_VARIANT_ATTEMPTS) and the first build is kept if it runs out, so a step
-       whose whole domain is illegal for this base still yields 9 genomes instead of
+       whose whole domain is illegal for this base still yields a full panel instead of
        looping forever. */
   function elementVariants(base, step, rand) {
     rand = rand || Math.random;
@@ -1130,7 +1152,59 @@
     }
 
     applyMustCombos(out, baseG, stepDef);
-    return out;
+
+    /* wild cards, then a shuffle of everything except the anchor: the "keep as is"
+       face stays cell 1 where the user can always find it, while the variants and the
+       wild cards are interleaved so a wild card is never identifiable by position
+       alone (only by its badge). meta rides alongside, aligned by index. */
+    var meta = ['anchor'];
+    for (j = 1; j < out.length; j++) meta.push('variant');
+    for (j = 0; j < WILD_COUNT; j++) {
+      out.push(wildCard(baseG, stepDef, rand));
+      meta.push('wild');
+    }
+    var tailPop = out.slice(1), tailMeta = meta.slice(1);
+    shuffleParallelR(rand, tailPop, tailMeta);
+
+    return { population: [out[0]].concat(tailPop), meta: ['anchor'].concat(tailMeta) };
+  }
+
+  /* wildCard(baseG, stepDef, rand) -> one deliberately bold candidate, the escape hatch
+     from a local minimum. Sequential element picking can walk itself into a corner: once
+     a wrong-ish hair or face shape is locked in, every later panel is a small variation
+     on that wrong face and there is no way back. A wild card re-rolls this step's genes
+     AND roughly WILD_REROLL_P of every other non-persona gene, so it lands somewhere
+     genuinely different while still being a face built from the same working genome.
+
+     Two things keep it "on topic" rather than pure noise: the persona (age + gender) is
+     held fixed unless this IS the persona step, and every roll goes through
+     mutateOneGene, so it stays inside each gene's legal domain for this face. Like every
+     other alternative it gets a fresh wobbleSeed and freshly rolled style genes.
+
+     Picking a wild card merges ALL of its genes into the working genome, not just the
+     step's – that is the whole point of the jump, and app.js's mergeStepGenes documents
+     the same thing from the other side. */
+  function wildCard(baseG, stepDef, rand) {
+    var isPersonaStep = false;
+    for (var p = 0; p < PERSONA_GENES.length; p++) {
+      if (stepDef.genes.indexOf(PERSONA_GENES[p]) >= 0) isPersonaStep = true;
+    }
+    var g = {};
+    for (var i = 0; i < GENE_NAMES.length; i++) g[GENE_NAMES[i]] = baseG[GENE_NAMES[i]];
+
+    for (i = 0; i < GENE_NAMES.length; i++) {
+      var name = GENE_NAMES[i];
+      if (name === 'wobbleSeed') continue;                       // rolled outright below
+      if (inList(name, STYLE_GENES)) continue;                   // rolled outright below
+      if (!isPersonaStep && inList(name, PERSONA_GENES)) continue; // locked persona
+      var isStepGene = stepDef.genes.indexOf(name) >= 0;
+      if (!isStepGene && !chanceR(rand, WILD_REROLL_P)) continue;
+      mutateOneGene(g, name, null, rand);
+    }
+
+    g.wobbleSeed = (rand() * 4294967296) | 0;
+    for (i = 0; i < STYLE_GENES.length; i++) rollStyleGene(g, STYLE_GENES[i], rand);
+    return repair(g);
   }
 
   /* applyMustCombos(variants, baseG, stepDef) – guarantees every combination listed in
@@ -2005,6 +2079,8 @@
     initialPopulation: initialPopulation,
     ELEMENT_STEPS: ELEMENT_STEPS,
     STYLE_GENES: STYLE_GENES,
+    PERSONA_GENES: PERSONA_GENES,
+    PANEL_SIZE: PANEL_SIZE,
     elementVariants: elementVariants,
     /* the one member outside the namespace contract: shared utilities the dev pages,
        the probes and the Node checks may lean on. Not part of the app's public surface. */

@@ -29,6 +29,12 @@ var COMPOSITE_GAP = 24;                  // px gap between photo and portrait in
    generations: the run is a fixed-length walk over these steps). */
 var ELEMENT_STEPS = window.Genome.ELEMENT_STEPS;
 var STEP_COUNT = ELEMENT_STEPS.length;
+/* PANEL_SIZE (12) = 1 keep-as-is anchor + 8 element variants + 3 wild cards, laid out
+   4 across x 3 down. Read off genome.js so the grid, the composite sent to the judge,
+   the prompt's "1-12", the sanitizer's range and the keyboard shortcuts can never
+   disagree about how many cells there are. */
+var PANEL_SIZE = window.Genome.PANEL_SIZE;
+var GRID_COLS = 4, GRID_ROWS = 3;
 
 /* NEUTRAL_BASE – the working genome every run starts from: an adult, neutral,
    oval-faced, mid-everything face carrying no element the user hasn't picked yet.
@@ -83,15 +89,15 @@ var TRAIT_LIST = Object.keys(window.Genome.HINT_MAP);
    requested (and still sanitized and logged) so the reply shape and the sanitizer stay
    unchanged – on this branch they are shown in the log only and bias nothing. */
 function judgePromptFor(label) {
-  return 'You are comparing a reference photo (the first image) to a 3x3 grid of 9 ' +
-    'hand-drawn sketch portraits (the second image; each cell has a number 1-9 in a badge in its ' +
-    'corner). The sketches all show the same face. They differ in the ' + label +
+  return 'You are comparing a reference photo (the first image) to a 4x3 grid of ' + PANEL_SIZE +
+    ' hand-drawn sketch portraits (the second image; each cell has a number 1-' + PANEL_SIZE +
+    ' in a badge in its corner). The sketches all show the same face. They differ in the ' + label +
     ' and in ink color / drawing style. Ignore the ink color and drawing style - pick the sketch whose ' +
     label + ' best matches the person in the photo. Then give at most ' + MAX_HINTS_REQUESTED +
     ' hints for how the sketch could look more like the person, using ONLY ' +
     'these trait names: ' + TRAIT_LIST.join(', ') + '. ' +
     'Respond with ONLY this JSON object and nothing else - no markdown fencing, no commentary: ' +
-    '{ "best": <integer 1-9>, "hints": [ { "trait": "<one of the trait names above>", ' +
+    '{ "best": <integer 1-' + PANEL_SIZE + '>, "hints": [ { "trait": "<one of the trait names above>", ' +
     '"suggestion": "<short phrase>" } ] }';
 }
 
@@ -151,8 +157,9 @@ var App = {
     settingsKeyNote: initialHealNote,     // Task 13: info note shown after a paste- or load-time auto-heal moved a key
     runError: null,                       // judge-failure message shown while phase === 'paused'
     generation: 0,          // element mode: the 1-based STEP number (the data-generation contract keeps its name)
-    population: null,      // array of 9 genomes, current step's variants
-    winner: null,           // 1-9 or null
+    population: null,      // array of PANEL_SIZE genomes, current step's panel
+    populationMeta: null,  // aligned 'anchor' | 'variant' | 'wild' per cell (from Genome.elementVariants)
+    winner: null,           // 1-PANEL_SIZE or null
     winnerSource: null,     // 'ai' | 'manual' | null
     winnerHints: [],         // [{trait, suggestion}] from the AI judge that picked winner (kept across a manual override)
     workingGenome: null,     // the face locked in so far: NEUTRAL_BASE at step 1, then each picked step's genes
@@ -302,18 +309,19 @@ function readPhotoFile(file) {
   });
 }
 
-/* buildGridJpeg(population) -> JPEG data URL. 3x3 composite of the current
-   population, each cell ~300px, a big "1"-"9" corner badge, colours read
-   live from the CSS tokens (never hardcoded). Sent to vision APIs in a
-   later task. */
+/* buildGridJpeg(population) -> JPEG data URL. 4x3 composite of the current panel, each
+   cell ~300px, a big "1"-"12" corner badge, colours read live from the CSS tokens
+   (never hardcoded). This is what the vision API sees, and it deliberately carries NO
+   wild-card badge: the wild-card marker exists to tell the USER a cell is a big jump,
+   and drawing it here would hand the judge a reason to favour or avoid those cells. */
 function buildGridJpeg(population) {
   var paper = tok('--paper');
   var ink = tok('--ink');
   var line = tok('--line-2');
 
   var composite = document.createElement('canvas');
-  composite.width = COMPOSITE_CELL_W * 3;
-  composite.height = COMPOSITE_CELL_H * 3;
+  composite.width = COMPOSITE_CELL_W * GRID_COLS;
+  composite.height = COMPOSITE_CELL_H * GRID_ROWS;
   var ctx = composite.getContext('2d');
   ctx.fillStyle = paper;
   ctx.fillRect(0, 0, composite.width, composite.height);
@@ -323,7 +331,7 @@ function buildGridJpeg(population) {
   cellCanvas.height = COMPOSITE_CELL_H;
 
   for (var i = 0; i < population.length; i++) {
-    var row = Math.floor(i / 3), col = i % 3;
+    var row = Math.floor(i / GRID_COLS), col = i % GRID_COLS;
     var x = col * COMPOSITE_CELL_W, y = row * COMPOSITE_CELL_H;
     window.Genome.renderGenome(cellCanvas, population[i]);
     ctx.drawImage(cellCanvas, x, y);
@@ -721,9 +729,10 @@ function judgeClaude(model, key, photoDataUrl, gridDataUrl, prompt) {
    the picked cell, even after the population has since moved on. hash is
    precomputed here so it lands on data-winner-hash without re-hashing on every
    render. */
-function makeLogEntry(gen, best, source, hints, detail, genome) {
+function makeLogEntry(gen, best, source, hints, detail, genome, wild) {
   return {
     gen: gen, best: best, source: source, hints: hints || [], detail: detail || '',
+    wild: !!wild,
     genome: genome || null,
     hash: genome ? window.Genome.genomeHash(genome) : null,
   };
@@ -768,7 +777,14 @@ function isStepSkipped(stepNumber, genome) {
    chose it. Since the picked genome came out of elementVariants(working, step), this
    merge reproduces that candidate exactly – it is a merge, not an approximation.
    Never mutates its inputs. */
-function mergeStepGenes(working, stepNumber, pickedGenome) {
+function mergeStepGenes(working, stepNumber, pickedGenome, isWild) {
+  /* A WILD CARD merges whole: it is a deliberate jump to a different face – hair, nose,
+     eyes and all, minus the locked persona – and copying only this step's genes off it
+     would throw away exactly the jump the user picked it for. Everything it changed is
+     already legal for this face (genome.js's wildCard rolls inside each gene's domain
+     and holds the persona fixed), so the whole genome is the merge. */
+  if (isWild) return window.Genome.repair(pickedGenome);
+
   var step = stepAt(stepNumber);
   var carried = (step ? step.genes : []).concat(window.Genome.STYLE_GENES).concat(['wobbleSeed']);
   var merged = {};
@@ -777,6 +793,12 @@ function mergeStepGenes(working, stepNumber, pickedGenome) {
   }
   for (var i = 0; i < carried.length; i++) merged[carried[i]] = pickedGenome[carried[i]];
   return window.Genome.repair(merged);
+}
+
+/* isWildCell(s, index) – is the 1-based cell a wild card in the panel currently in
+   state? Used by the merge, the log line and the badge, so all three agree. */
+function isWildCell(s, index) {
+  return !!(s.populationMeta && s.populationMeta[index - 1] === 'wild');
 }
 
 // ─── Helpers: review timer (drives REVIEW_MS auto-advance; Pause/Resume freezes it) ───
@@ -844,7 +866,7 @@ function runJudge(attempt, epoch) {
 
   judge(provider, model, key, photoJpeg, gridJpeg, prompt).then(function (text) {
     if (epoch !== judgeEpoch || App.state.phase !== 'judging') return; // stale – a newer run/generation moved on
-    var parsed = window.Genome.sanitizeJudgeReply(text);
+    var parsed = window.Genome.sanitizeJudgeReply(text, PANEL_SIZE);
     if (!parsed) {
       handleJudgeFailure(attempt, epoch, 'The judge reply could not be understood.');
       return;
@@ -982,9 +1004,10 @@ function advanceStep() {
 
   var winnerIndex = s.winner;
   var winnerGenome = s.population[winnerIndex - 1];
+  var wild = isWildCell(s, winnerIndex);
   var hints = s.winnerHints || [];
-  var working = mergeStepGenes(s.workingGenome, s.generation, winnerGenome);
-  var entry = makeLogEntry(s.generation, winnerIndex, s.winnerSource || 'manual', hints, undefined, working);
+  var working = mergeStepGenes(s.workingGenome, s.generation, winnerGenome, wild);
+  var entry = makeLogEntry(s.generation, winnerIndex, s.winnerSource || 'manual', hints, undefined, working, wild);
 
   /* skip any following step that has nothing to offer this face (today: facial hair on
      a child), leaving a log note so the jump in step numbers is explained. A loop, not
@@ -1004,9 +1027,11 @@ function advanceStep() {
     return;
   }
 
+  var built = window.Genome.elementVariants(working, stepAt(nextStep), Math.random);
   App.set({
     generation: nextStep,
-    population: window.Genome.elementVariants(working, stepAt(nextStep), Math.random),
+    population: built.population,
+    populationMeta: built.meta,
     workingGenome: working,
     winner: null,
     winnerSource: null,
@@ -1214,7 +1239,7 @@ function renderRunStatus(s) {
     status.textContent = 'Winner picked' + (s.winnerSource === 'ai' ? ' by the judge' : '') +
       ' – advancing soon (press Enter now)';
   } else {
-    status.textContent = 'Pick a candidate: click a cell or press 1-9';
+    status.textContent = 'Pick a candidate: click a cell, or press 1-9 / 0 / - / =';
   }
   return status;
 }
@@ -1451,12 +1476,14 @@ function renderCell(s, i) {
   var genome = s.population[i];
   var hash = window.Genome.genomeHash(genome);
   var isWinner = s.winner === index;
-  var label = 'Candidate ' + index +
+  var isWild = isWildCell(s, index);
+  var label = 'Candidate ' + index + (isWild ? ', wild card' : '') +
     (isWinner ? ', selected' + (s.winnerSource === 'ai' ? ' by AI' : ' by you') : '');
   var cell = el('div', {
-    class: 'cell' + (isWinner ? ' is-winner' : ''),
+    class: 'cell' + (isWinner ? ' is-winner' : '') + (isWild ? ' is-wild' : ''),
     'data-index': String(index),
     'data-genome-hash': hash,
+    'data-wild': isWild ? 'true' : 'false',
     tabindex: '0',
     role: 'button',
     'aria-label': label,
@@ -1466,6 +1493,14 @@ function renderCell(s, i) {
   window.Genome.renderGenome(canvas, genome);
   cell.appendChild(canvas);
   cell.appendChild(el('span', { class: 'cell-badge', text: String(index) }));
+  /* wild-card marker: a DOM overlay only. buildGridJpeg deliberately does not draw it,
+     so the judge cannot tell a wild card from a variant and can neither chase nor avoid
+     them; the marker is purely a heads-up to the person looking at the grid. */
+  if (isWild) {
+    cell.appendChild(el('span', {
+      class: 'cell-wild', title: 'Wild card - a bigger jump', 'aria-hidden': 'true', text: '\u2726',
+    }));
+  }
 
   cell.addEventListener('click', function () { onCellPick(index); });
   cell.addEventListener('keydown', function (ev) {
@@ -1539,6 +1574,7 @@ function renderRightColumn(s) {
       'data-best': String(entry.best),
       'data-source': entry.source,
       'data-hints': String((entry.hints || []).length),
+      'data-wild': entry.wild ? 'true' : 'false',
       'data-winner-hash': entry.hash || '', // Task 9: DOM contract gains this attribute, never loses one
     });
 
@@ -1567,7 +1603,7 @@ function renderRightColumn(s) {
     var head = 'Step ' + entry.gen + ' - ' + stepLabel(entry.gen) + ' - ';
     text.textContent = entry.source === 'skipped'
       ? head + 'skipped' + (entry.detail ? ' (' + entry.detail + ')' : '')
-      : head + 'face ' + entry.best + ' (' + entry.source + ')' +
+      : head + 'face ' + entry.best + ' (' + entry.source + (entry.wild ? ', wild card' : '') + ')' +
         ' - hints: ' + hintsText + (entry.detail ? ' - ' + entry.detail : '');
     line.appendChild(text);
 
@@ -1669,11 +1705,13 @@ function onStartClick() {
   var working = window.Genome.repair(Object.assign({}, NEUTRAL_BASE, {
     wobbleSeed: (Math.random() * 4294967296) | 0,
   }));
+  var firstPanel = window.Genome.elementVariants(working, stepAt(1), Math.random);
   App.set({
     state: 'running',
     phase: 'drawing',
     generation: 1,
-    population: window.Genome.elementVariants(working, stepAt(1), Math.random),
+    population: firstPanel.population,
+    populationMeta: firstPanel.meta,
     workingGenome: working,
     winner: null,
     winnerSource: null,
@@ -1714,12 +1752,25 @@ function onStopClick() {
   var winnerIndex = picked ? s.winner : 0;
   var source = picked ? (s.winnerSource || 'manual') : 'manual';
   var hints = picked ? (s.winnerHints || []) : [];
+  var stoppedWild = picked && isWildCell(s, s.winner);
   var genome = picked
-    ? mergeStepGenes(s.workingGenome, s.generation, s.population[s.winner - 1])
+    ? mergeStepGenes(s.workingGenome, s.generation, s.population[s.winner - 1], stoppedWild)
     : (s.workingGenome || (s.population && s.population[0]));
   var entry = makeLogEntry(s.generation, winnerIndex, source, hints,
-    picked ? 'stopped' : 'stopped before a pick - kept the face as it was', genome);
+    picked ? 'stopped' : 'stopped before a pick - kept the face as it was', genome, stoppedWild);
   finishRun(winnerIndex, entry);
+}
+
+/* cellKeyIndex(key) -> the 1-based cell a keystroke selects, or 0 for anything else.
+   Digits 1-9 map to themselves; the panel's extra three cells continue along the same
+   physical keyboard row, so 0 is cell 10 and the two keys after it ('-' and '=') are
+   11 and 12. Kept as one function so the handler and the footer hint can't drift. */
+function cellKeyIndex(key) {
+  if (key >= '1' && key <= '9') return parseInt(key, 10);
+  if (key === '0') return 10;
+  if (key === '-') return 11;
+  if (key === '=') return 12;
+  return 0;
 }
 
 /* triggerPortraitDownload() (Task 7): what the "s" keyboard shortcut does on the done
@@ -1764,7 +1815,7 @@ function onStartOverClick() {
   judgeEpoch++; // invalidate any judge Promise still in flight
   reviewRemainingMs = null;
   App.set({
-    state: 'ready', phase: null, population: null, generation: 0,
+    state: 'ready', phase: null, population: null, populationMeta: null, generation: 0,
     winner: null, winnerSource: null, winnerHints: [], workingGenome: null, runError: null, log: [], error: null,
     doneGenome: null, portraitDataUrl: null, compositeDataUrl: null,
   });
@@ -1777,7 +1828,7 @@ function onNewPhotoClick() {
   judgeEpoch++; // invalidate any judge Promise still in flight
   reviewRemainingMs = null;
   App.set({
-    state: 'idle', phase: null, population: null, generation: 0,
+    state: 'idle', phase: null, population: null, populationMeta: null, generation: 0,
     winner: null, winnerSource: null, winnerHints: [], workingGenome: null, runError: null, log: [], error: null, photo: null,
     doneGenome: null, portraitDataUrl: null, compositeDataUrl: null,
   });
@@ -1868,7 +1919,8 @@ function onKeyChange(value) {
     }
   });
 
-  /* keyboard (spec §5, Task 7): 1-9 pick a candidate, space pauses/resumes, enter
+  /* keyboard (spec §5, Task 7): 1-9 and 0/-/= pick a candidate (see cellKeyIndex),
+     space pauses/resumes, enter
      advances the review immediately once a winner exists, s saves the portrait once
      done. Bound once here (not per-render) so listeners never pile up.
 
@@ -1881,7 +1933,8 @@ function onKeyChange(value) {
        keystroke would either double-fire (e.g. Space on the Pause button toggling
        twice) or steal Space away from "pick this focused candidate". Those two keys
        are skipped whenever an interactive control already owns them; digits and s
-       don't have that conflict since nothing else binds them. */
+       don't have that conflict since nothing else binds them (0, - and = are in the
+       same boat as the digits). */
   window.addEventListener('keydown', function (ev) {
     var target = ev.target;
     var tag = (target && target.tagName) || '';
@@ -1903,8 +1956,8 @@ function onKeyChange(value) {
 
     if (s.state !== 'running' || (s.phase !== 'reviewing' && s.phase !== 'paused')) return;
 
-    if (ev.key >= '1' && ev.key <= '9') {
-      var idx = parseInt(ev.key, 10);
+    var idx = cellKeyIndex(ev.key);
+    if (idx) {
       if (s.population && idx <= s.population.length) {
         ev.preventDefault();
         onCellPick(idx);

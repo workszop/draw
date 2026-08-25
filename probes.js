@@ -200,8 +200,23 @@
         expected: null,
       },
       {
-        name: 'best out of range (12)',
+        /* the historic default limit is 9, so 12 is still out of range when maxBest is
+           not passed – the pre-12-cell callers keep their exact behaviour */
+        name: 'best out of range (12) at the default limit',
         text: '{"best": 12, "hints": []}',
+        expected: null,
+      },
+      {
+        /* the same reply IS valid for the 12-cell element panel, which passes maxBest */
+        name: 'best 12 accepted when maxBest is 12',
+        text: '{"best": 12, "hints": []}',
+        maxBest: 12,
+        expected: { best: 12, hints: [] },
+      },
+      {
+        name: 'best out of range (13) even when maxBest is 12',
+        text: '{"best": 13, "hints": []}',
+        maxBest: 12,
         expected: null,
       },
       {
@@ -253,7 +268,7 @@
     var fails = [];
     for (var i = 0; i < fixtures.length; i++) {
       var f = fixtures[i];
-      var actual = sanitize(f.text);
+      var actual = sanitize(f.text, f.maxBest);
       if (JSON.stringify(actual) !== JSON.stringify(f.expected)) {
         fails.push(f.name + ': got ' + JSON.stringify(actual) + ', expected ' + JSON.stringify(f.expected));
       }
@@ -268,18 +283,22 @@
 
   /* probe 6 (elements branch): Genome.elementVariants() – the identikit contract, over
      all 8 ELEMENT_STEPS on 20 random bases each:
-       - exactly 9 candidates, all of them repair no-ops;
-       - candidate 1 deep-equals the base (the always-available "keep as is"), the
-         base's own wobbleSeed and style genes included;
-       - outside the step's genes, candidates 2-9 may differ from the base ONLY in
+       - exactly PANEL_SIZE (12) candidates with an aligned meta array holding exactly
+         one 'anchor', 8 'variant' and 3 'wild'; all of them repair no-ops;
+       - cell 1 is the anchor and deep-equals the base (the always-available "keep as
+         is"), the base's own wobbleSeed and style genes included;
+       - outside the step's genes, a VARIANT may differ from the base ONLY in
          wobbleSeed and Genome.STYLE_GENES (the fresh hand and the swapped pen that
          make the panel fun) – never in another element's identity genes, and never
          in skinIdx / hairFillIdx / hairTintIdx, which belong to their own steps;
-       - any remaining difference must be one repair() itself forces (a child face
-         losing its beard, an age change pulling headW back into range). That is
+       - any remaining variant difference must be one repair() itself forces (a child
+         face losing its beard, an age change pulling headW back into range). That is
          checked exactly, not waved through: re-merging the candidate's step genes,
          style genes and wobbleSeed onto the base and repairing must reproduce the
          candidate gene for gene;
+       - a WILD card is allowed to differ anywhere EXCEPT the persona: age and gender
+         must equal the base's unless this is the persona step itself. That is what
+         keeps a wild card on topic instead of a fresh random face;
        - the base object handed in is not mutated. */
   function elementVariantContract() {
     var Genome = window.Genome;
@@ -287,6 +306,8 @@
     var geneNames = Genome._internal.GENE_NAMES;
     var steps = Genome.ELEMENT_STEPS;
     var styleGenes = Genome.STYLE_GENES;
+    var personaGenes = Genome.PERSONA_GENES;
+    var panelSize = Genome.PANEL_SIZE;
     var runs = 20, fails = [], candidates = 0;
 
     function hash(g) { return Genome.genomeHash(g); }
@@ -307,20 +328,46 @@
         var allowed = {};
         carried.forEach(function (n) { allowed[n] = true; });
         var beforeHash = hash(base);
-        var variants = Genome.elementVariants(base, step, rand);
+        var built = Genome.elementVariants(base, step, rand);
+        var variants = built && built.population;
+        var meta = built && built.meta;
         var where = 'run ' + r + '/' + step.id + ': ';
+        var isPersonaStep = personaGenes.some(function (n) { return step.genes.indexOf(n) >= 0; });
 
         if (hash(base) !== beforeHash) fails.push(where + 'elementVariants mutated its input');
-        if (!Array.isArray(variants) || variants.length !== 9) {
-          fails.push(where + 'expected 9 candidates, got ' + (variants && variants.length));
+        if (!Array.isArray(variants) || variants.length !== panelSize) {
+          fails.push(where + 'expected ' + panelSize + ' candidates, got ' + (variants && variants.length));
           continue;
         }
+        if (!Array.isArray(meta) || meta.length !== panelSize) {
+          fails.push(where + 'meta was not ' + panelSize + ' entries');
+          continue;
+        }
+        var counts = { anchor: 0, variant: 0, wild: 0 };
+        meta.forEach(function (m) { if (counts[m] !== undefined) counts[m]++; });
+        if (counts.anchor !== 1 || counts.variant !== 8 || counts.wild !== 3) {
+          fails.push(where + 'meta split was ' + counts.anchor + '/' + counts.variant + '/' + counts.wild +
+            ', expected 1 anchor / 8 variant / 3 wild');
+        }
+        if (meta[0] !== 'anchor') fails.push(where + 'cell 1 was not the anchor');
         if (!sameGenes(variants[0], base)) fails.push(where + 'candidate 1 did not equal the base');
 
         for (var c = 0; c < variants.length; c++) {
           var g = variants[c];
           candidates++;
           if (hash(g) !== hash(Genome.repair(g))) fails.push(where + 'candidate ' + (c + 1) + ' is not repaired');
+
+          if (meta[c] === 'wild') {
+            // a wild card may go anywhere except back out of the chosen persona
+            if (!isPersonaStep) {
+              personaGenes.forEach(function (n) {
+                if (g[n] !== base[n]) {
+                  fails.push(where + 'wild card ' + (c + 1) + ' changed the locked persona gene ' + n);
+                }
+              });
+            }
+            continue;
+          }
 
           /* every difference outside the allowed set must be a repair consequence:
              rebuild the candidate from base + its own allowed genes, demand a match */
@@ -341,7 +388,8 @@
       pass: fails.length === 0,
       detail: fails.length === 0
         ? candidates + ' candidates over ' + steps.length + ' steps x ' + runs +
-          ' bases: 9 per step, candidate 1 = base, non-step diffs limited to style/wobbleSeed + repair consequences'
+          ' bases: ' + panelSize + ' per step (1 anchor / 8 variants / 3 wild), cell 1 = base, ' +
+          'variant non-step diffs limited to style/wobbleSeed + repair consequences, wild personas locked'
         : fails.slice(0, 5).join(' | ') + (fails.length > 5 ? ' …(+' + (fails.length - 5) + ' more)' : ''),
     };
   }
@@ -352,8 +400,8 @@
     { name: 'repair validity: 500 mutations all repair-idempotent', fn: repairValidity },
     { name: 'stratification: 50 initialPopulation() calls satisfy §3.5', fn: stratification },
     { name: 'diversity: 9 members, no winner copy, 6/3 split, >=5/6 mutants differ across 3 generations', fn: diversity },
-    { name: 'sanitizer: 8 fixture replies parse to expected results', fn: sanitizerFixtures },
-    { name: 'element variants: 9 per step, candidate 1 = base, only the step\'s element plus pen/ink style varies', fn: elementVariantContract },
+    { name: 'sanitizer: 10 fixture replies parse to expected results', fn: sanitizerFixtures },
+    { name: 'element variants: 12 per step (anchor + 8 variants + 3 wild cards), cell 1 = base, variants move only their element plus pen/ink style', fn: elementVariantContract },
   ];
 
   var Probes = {
