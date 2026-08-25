@@ -132,7 +132,7 @@ body.edu { background: var(--paper); color: var(--ink); font-family: var(--font-
    done screen, where this group renders alone - no orphan border then). */
 .header-photo-actions { display: flex; align-items: center; gap: 10px; }
 .header-controls-inner.has-run-controls .header-photo-actions {
-  margin-left: 4px; padding-left: 14px; border-left: 1px solid var(--line-2);
+  margin-right: 4px; padding-right: 14px; border-right: 1px solid var(--line-2);
 }
 
 .edu-btn {

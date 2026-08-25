@@ -1025,7 +1025,10 @@ function renderHeaderControls(s) {
   if (hasRunControls) wrap.classList.add('has-run-controls');
 
   // review fix: run controls (Start/Pause/Stop + progress) hidden on the done
-  // screen; the Restart/New photo group below renders regardless of state.
+  // screen; the Restart/New photo group renders regardless of state, and sits
+  // BEFORE the run controls (user request: Restart to the left of Start).
+  wrap.appendChild(renderHeaderPhotoActions(s));
+
   if (hasRunControls) {
     var startBtn = el('button', { class: 'edu-btn', type: 'button', text: 'Start' });
     startBtn.disabled = s.state !== 'ready';
@@ -1047,8 +1050,6 @@ function renderHeaderControls(s) {
     var progress = renderProgressBar(s);
     if (progress) wrap.appendChild(progress);
   }
-
-  wrap.appendChild(renderHeaderPhotoActions(s));
 
   return wrap;
 }
