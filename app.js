@@ -61,6 +61,21 @@ var JUDGE_PROMPT = 'You are comparing a reference photo (the first image) to a 3
   '{ "best": <integer 1-9>, "hints": [ { "trait": "<one of the trait names above>", ' +
   '"suggestion": "<short phrase>" } ] }';
 
+/* RETIRED_MODELS (Task 12) – pre-catalog stored model values that predate the current
+   curated lists. A stored per-provider model exactly matching its provider's entry
+   here is a migration candidate (see loadSettings), not a genuine custom model; any
+   other non-curated stored value is left alone as a real custom entry.
+   MUST be assigned before the State section below: loadSettings() is CALLED there
+   at script load, and a `var` assignment placed after that call is still undefined
+   when the call runs – the migration check then throws inside loadSettings' try and
+   the swallow-all catch silently skips loading the stored keys (the bug behind
+   "the app doesn't read my api key after reload"). */
+var RETIRED_MODELS = {
+  gemini: 'gemini-2.5-flash',
+  openai: 'gpt-4o',
+  claude: 'claude-opus-4-8',
+};
+
 // ─── State ───
 
 var initialSettings = loadSettings(); // localStorage['draw.settings'] + ['draw.keys'], sane defaults on any failure
@@ -314,16 +329,6 @@ function defaultModelFor(provider) {
   var info = window.AI_MODEL_CATALOG.providers[provider];
   return info.defaultModel ?? info.models[0];
 }
-
-/* RETIRED_MODELS (Task 12) – pre-catalog stored model values that predate the current
-   curated lists. A stored per-provider model exactly matching its provider's entry
-   here is a migration candidate (see loadSettings below), not a genuine custom model;
-   any other non-curated stored value is left alone as a real custom entry. */
-var RETIRED_MODELS = {
-  gemini: 'gemini-2.5-flash',
-  openai: 'gpt-4o',
-  claude: 'claude-opus-4-8',
-};
 
 /* loadSettings() -> { provider, models, keys }, read from localStorage['draw.settings']
    (provider + models) and localStorage['draw.keys'] (JSON object of key strings per
