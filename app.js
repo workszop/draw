@@ -76,16 +76,18 @@ var LOG_THUMB_W = 64, LOG_THUMB_H = 80;  // css px; backing canvas is device-pix
 var TRAIT_LIST = Object.keys(window.Genome.HINT_MAP);
 
 /* judgePromptFor(label) – the element-mode judge prompt: same strict JSON contract as
-   before, but the question is narrowed to the one element this step varies, since
-   every other feature is pixel-identical across the 9 sketches and comparing them on
-   anything else would be meaningless. Hints are still requested (and still sanitized
-   and logged) so the reply shape and the sanitizer stay unchanged – on this branch
-   they are shown in the log only and bias nothing. */
+   before, but the question is narrowed to the one element this step varies. The panel
+   also varies pen/ink/wash and the stroke texture from sketch to sketch (see
+   Genome.STYLE_GENES), which is pure decoration – the prompt says so explicitly, so a
+   model can't mistake "drawn in a darker ink" for "has darker hair". Hints are still
+   requested (and still sanitized and logged) so the reply shape and the sanitizer stay
+   unchanged – on this branch they are shown in the log only and bias nothing. */
 function judgePromptFor(label) {
   return 'You are comparing a reference photo (the first image) to a 3x3 grid of 9 ' +
     'hand-drawn sketch portraits (the second image; each cell has a number 1-9 in a badge in its ' +
-    'corner). The 9 sketches differ ONLY in the ' + label + '. Pick the sketch whose ' + label +
-    ' best matches the person in the photo. Then give at most ' + MAX_HINTS_REQUESTED +
+    'corner). The sketches all show the same face. They differ in the ' + label +
+    ' and in ink color / drawing style. Ignore the ink color and drawing style - pick the sketch whose ' +
+    label + ' best matches the person in the photo. Then give at most ' + MAX_HINTS_REQUESTED +
     ' hints for how the sketch could look more like the person, using ONLY ' +
     'these trait names: ' + TRAIT_LIST.join(', ') + '. ' +
     'Respond with ONLY this JSON object and nothing else - no markdown fencing, no commentary: ' +
@@ -755,20 +757,25 @@ function isStepSkipped(stepNumber, genome) {
 }
 
 /* mergeStepGenes(working, stepNumber, pickedGenome) – the winner's genes FOR THIS STEP
-   copied onto the working genome, then repaired. Only the step's own genes travel;
-   repair() then re-derives any consequence they force (a child face losing its beard,
-   an age change pulling the head size back into range). Since the picked genome came
-   out of elementVariants(working, step) with the same wobbleSeed, this reproduces that
-   candidate exactly – it is a merge, not an approximation. Never mutates its inputs. */
+   copied onto the working genome, then repaired. repair() re-derives any consequence
+   they force (a child face losing its beard, an age change pulling the head size back
+   into range).
+
+   The picked sketch's LOOK travels with it too: its style genes (ink, pen width, wash,
+   accent – Genome.STYLE_GENES) and its wobbleSeed. Picking a sketch is picking the
+   drawing you liked, so the vibe you picked is the one the run keeps; the alternative
+   (snapping every pick back to the base's pen) would repaint the face the moment you
+   chose it. Since the picked genome came out of elementVariants(working, step), this
+   merge reproduces that candidate exactly – it is a merge, not an approximation.
+   Never mutates its inputs. */
 function mergeStepGenes(working, stepNumber, pickedGenome) {
   var step = stepAt(stepNumber);
+  var carried = (step ? step.genes : []).concat(window.Genome.STYLE_GENES).concat(['wobbleSeed']);
   var merged = {};
   for (var k in working) {
     if (Object.prototype.hasOwnProperty.call(working, k)) merged[k] = working[k];
   }
-  if (step) {
-    for (var i = 0; i < step.genes.length; i++) merged[step.genes[i]] = pickedGenome[step.genes[i]];
-  }
+  for (var i = 0; i < carried.length; i++) merged[carried[i]] = pickedGenome[carried[i]];
   return window.Genome.repair(merged);
 }
 

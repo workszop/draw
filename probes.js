@@ -269,21 +269,24 @@
   /* probe 6 (elements branch): Genome.elementVariants() – the identikit contract, over
      all 8 ELEMENT_STEPS on 20 random bases each:
        - exactly 9 candidates, all of them repair no-ops;
-       - candidate 1 deep-equals the base (the always-available "keep as is");
-       - every candidate keeps the base's wobbleSeed (the determinism contract: it is
-         what makes the 9 faces pixel-identical outside the step's element);
-       - no candidate differs from the base in a gene outside the step's set, EXCEPT
-         where repair() itself forces the change (a child face losing its beard, an age
-         change pulling headW back into range). That exception is checked exactly, not
-         waved through: re-merging the candidate's step genes onto the base and
-         repairing must reproduce the candidate gene for gene, so every non-step
-         difference is provably a repair consequence and nothing else;
+       - candidate 1 deep-equals the base (the always-available "keep as is"), the
+         base's own wobbleSeed and style genes included;
+       - outside the step's genes, candidates 2-9 may differ from the base ONLY in
+         wobbleSeed and Genome.STYLE_GENES (the fresh hand and the swapped pen that
+         make the panel fun) – never in another element's identity genes, and never
+         in skinIdx / hairFillIdx / hairTintIdx, which belong to their own steps;
+       - any remaining difference must be one repair() itself forces (a child face
+         losing its beard, an age change pulling headW back into range). That is
+         checked exactly, not waved through: re-merging the candidate's step genes,
+         style genes and wobbleSeed onto the base and repairing must reproduce the
+         candidate gene for gene;
        - the base object handed in is not mutated. */
   function elementVariantContract() {
     var Genome = window.Genome;
     var rand = Genome._internal.mulberry32(0x5E1EC7);
     var geneNames = Genome._internal.GENE_NAMES;
     var steps = Genome.ELEMENT_STEPS;
+    var styleGenes = Genome.STYLE_GENES;
     var runs = 20, fails = [], candidates = 0;
 
     function hash(g) { return Genome.genomeHash(g); }
@@ -298,8 +301,11 @@
       var base = Genome.randomGenome(rand);
       for (var si = 0; si < steps.length; si++) {
         var step = steps[si];
-        var stepGenes = {};
-        step.genes.forEach(function (n) { stepGenes[n] = true; });
+        /* carried = every gene a candidate is allowed to move: the step's own, plus
+           the decoration (style genes + wobbleSeed) shared by all steps */
+        var carried = step.genes.concat(styleGenes).concat(['wobbleSeed']);
+        var allowed = {};
+        carried.forEach(function (n) { allowed[n] = true; });
         var beforeHash = hash(base);
         var variants = Genome.elementVariants(base, step, rand);
         var where = 'run ' + r + '/' + step.id + ': ';
@@ -315,16 +321,15 @@
           var g = variants[c];
           candidates++;
           if (hash(g) !== hash(Genome.repair(g))) fails.push(where + 'candidate ' + (c + 1) + ' is not repaired');
-          if (g.wobbleSeed !== base.wobbleSeed) fails.push(where + 'candidate ' + (c + 1) + ' changed wobbleSeed');
 
-          /* every non-step difference must be a repair consequence: rebuild the
-             candidate from base + its own step genes and demand an exact match */
+          /* every difference outside the allowed set must be a repair consequence:
+             rebuild the candidate from base + its own allowed genes, demand a match */
           var merged = {};
           for (var k = 0; k < geneNames.length; k++) merged[geneNames[k]] = base[geneNames[k]];
-          step.genes.forEach(function (n) { merged[n] = g[n]; });
+          carried.forEach(function (n) { merged[n] = g[n]; });
           if (!sameGenes(Genome.repair(merged), g)) {
             var offenders = geneNames.filter(function (n) {
-              return !stepGenes[n] && g[n] !== base[n];
+              return !allowed[n] && g[n] !== base[n];
             });
             fails.push(where + 'candidate ' + (c + 1) + ' differs outside the step beyond repair (' +
               (offenders.join(',') || 'step genes themselves') + ')');
@@ -336,7 +341,7 @@
       pass: fails.length === 0,
       detail: fails.length === 0
         ? candidates + ' candidates over ' + steps.length + ' steps x ' + runs +
-          ' bases: 9 per step, candidate 1 = base, wobbleSeed held, every non-step diff a repair consequence'
+          ' bases: 9 per step, candidate 1 = base, non-step diffs limited to style/wobbleSeed + repair consequences'
         : fails.slice(0, 5).join(' | ') + (fails.length > 5 ? ' …(+' + (fails.length - 5) + ' more)' : ''),
     };
   }
@@ -348,7 +353,7 @@
     { name: 'stratification: 50 initialPopulation() calls satisfy §3.5', fn: stratification },
     { name: 'diversity: 9 members, no winner copy, 6/3 split, >=5/6 mutants differ across 3 generations', fn: diversity },
     { name: 'sanitizer: 8 fixture replies parse to expected results', fn: sanitizerFixtures },
-    { name: 'element variants: 9 per step, candidate 1 = base, same wobbleSeed, only the step\'s element varies', fn: elementVariantContract },
+    { name: 'element variants: 9 per step, candidate 1 = base, only the step\'s element plus pen/ink style varies', fn: elementVariantContract },
   ];
 
   var Probes = {

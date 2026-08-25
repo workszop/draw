@@ -878,14 +878,15 @@
      order matters (the run walks it front to back, locking one element per step).
      Each entry is { id, label, genes }: `label` is what the judge prompt, the
      progress indicator and the log line call the element, `genes` is exactly the
-     set of genes elementVariants() is allowed to vary for that step. Every other
-     gene – wobbleSeed above all – is held fixed, which is what makes the 9 grid
-     faces pixel-identical apart from the one element under review. */
+     set of genes elementVariants() is allowed to vary for that step. Outside those
+     genes a candidate may only differ from the base in its wobbleSeed (fresh stroke
+     texture) and in STYLE_GENES (the pen/ink/wash the sketch is drawn with) – never
+     in another element's identity genes. */
   var ELEMENT_STEPS = [
     { id: 'persona',     label: 'age and gender',              genes: ['age', 'gender'] },
     { id: 'face',        label: 'face shape and skin tone',    genes: ['faceShape', 'headW', 'headRatio', 'skinIdx'] },
     { id: 'hair',        label: 'hair',                        genes: ['hairStyle', 'hairDark', 'hairFillIdx', 'hairTintIdx'] },
-    { id: 'eyes',        label: 'eyes and eyebrows',           genes: ['eyeKind', 'eyeSize', 'eyeGap', 'browKind'] },
+    { id: 'eyes',        label: 'eyes and eyebrows',           genes: ['eyeKind', 'eyeSize', 'eyeGap', 'browKind', 'look'] },
     { id: 'nose',        label: 'nose',                        genes: ['noseKind', 'noseSize'] },
     { id: 'mouth',       label: 'mouth and expression',        genes: ['mouthKind', 'mouthSize', 'expr'] },
     { id: 'facial_hair', label: 'facial hair',                 genes: ['stache', 'beard'] },
@@ -893,8 +894,18 @@
   ];
 
   var VARIANT_COUNT = 9;              // candidates per step: 1 "keep as is" + 8 alternatives
-  var FLOAT_SAMPLES = 8;              // even samples a 'num' gene contributes to its value list
+  var FLOAT_SAMPLES = 8;              // stratified samples a 'num' gene contributes to its value list
   var MAX_VARIANT_ATTEMPTS = 24;      // bounded rebuild budget per candidate (see elementVariants)
+  var STYLE_P = 0.7;                  // per-candidate chance each STYLE_GENES entry is re-rolled
+  var FAR_JITTER = 0.55;              // how much randomness softens the far-from-base ordering
+
+  /* STYLE_GENES – how the sketch is DRAWN, as opposed to who it is of: the ink
+     colour, the pen width, the wash mode and the accent. They carry no identity, so
+     every candidate is free to re-roll them and the panel reads like a sketch artist
+     trying different pens and markers. Deliberately NOT skinIdx / hairFillIdx /
+     hairTintIdx: those are the person's own colouring, owned by the face and hair
+     steps, and letting an unrelated step repaint them would undo a locked-in choice. */
+  var STYLE_GENES = ['inkIdx', 'penW', 'washMode', 'accentIdx'];
 
   /* resolveStep(step) -> an ELEMENT_STEPS entry. Accepts the entry itself, its id
      string, or its index, so callers can pass whichever they already hold. */
@@ -906,48 +917,105 @@
     return ELEMENT_STEPS[0];
   }
 
-  /* geneValueList(name, base, rand) -> [baseValue, ...alternatives]. Index 0 is
-     always the base's own value, so a mixed-radix digit of 0 means "leave this gene
-     alone". Categorical/bool/idx genes contribute their whole domain (hairStyle only
-     the styles valid for the base's age; a nullable index also offers null); a float
-     gene contributes FLOAT_SAMPLES values spread evenly across its age-valid range.
-     The alternatives are rotated by a random offset so a Restart explores the domain
-     from a different starting point rather than always showing the same 8 first. */
+  /* geneDomain(name, base) -> { values, baseIndex } – the gene's full legal domain for
+     this base (hairStyle only the styles valid for its age; a nullable index also
+     offers null; a float gene is stratified into FLOAT_SAMPLES stops spanning the
+     WHOLE age-valid range, extremes included, so the panel can show the small end and
+     the big end of a nose, not just the polite middle). baseIndex is where the base's
+     own value sits, or -1 for a float (whose exact value is almost never a stop). */
+  function geneDomain(name, base) {
+    var desc = GENES[name];
+    var baseValue = base[name];
+    var values = [];
+    var i;
+    if (!desc) return { values: [baseValue], baseIndex: 0 };
+    if (desc.type === 'cat') {
+      var domain = desc.validFor ? desc.validFor(base.age) : desc.values;
+      for (i = 0; i < domain.length; i++) values.push(domain[i]);
+    } else if (desc.type === 'bool') {
+      values = [false, true];
+    } else if (desc.type === 'idx') {
+      if (desc.nullable) values.push(null);
+      for (i = 0; i < desc.n; i++) values.push(i);
+    } else if (desc.type === 'num') {
+      var r = desc.range(base.age);
+      for (i = 0; i < FLOAT_SAMPLES; i++) {
+        values.push(r[0] + i * (r[1] - r[0]) / (FLOAT_SAMPLES - 1));
+      }
+    }
+    var baseIndex = values.indexOf(baseValue);
+    if (desc.type === 'num') {
+      // a float's "position" is where its value falls in the range, not an exact stop
+      var rn = desc.range(base.age);
+      var span = rn[1] - rn[0];
+      baseIndex = span > 0 ? ((baseValue - rn[0]) / span) * (FLOAT_SAMPLES - 1) : 0;
+    }
+    return { values: values, baseIndex: baseIndex };
+  }
+
+  /* geneValueList(name, base, rand) -> [baseValue, ...alternatives]. Index 0 is always
+     the base's own value, so a mixed-radix digit of 0 means "leave this gene alone".
+     The alternatives are every OTHER value in the domain – sampled without replacement,
+     so a candidate never re-shows a value another candidate in the same panel already
+     has while an unused one is still on the table – ordered far-from-the-base first:
+     each alternative is scored by how far it sits from the base's value in the domain
+     (for a bool, an unordered category or a nullable slot, every alternative is simply
+     "different") and the score is jittered by FAR_JITTER so the ordering stays lively
+     across Restarts instead of replaying the same 8 every time. The point is that the
+     8 alternatives read as a genuinely different set of choices, not as eight nudges. */
   function geneValueList(name, base, rand) {
     var desc = GENES[name];
     var baseValue = base[name];
-    var others = [];
-    var i;
     if (!desc) return [baseValue];
-    if (desc.type === 'cat') {
-      var domain = desc.validFor ? desc.validFor(base.age) : desc.values;
-      for (i = 0; i < domain.length; i++) if (domain[i] !== baseValue) others.push(domain[i]);
-    } else if (desc.type === 'bool') {
-      others.push(!baseValue);
-    } else if (desc.type === 'idx') {
-      if (desc.nullable && baseValue !== null) others.push(null);
-      for (i = 0; i < desc.n; i++) if (i !== baseValue) others.push(i);
-    } else if (desc.type === 'num') {
-      var r = desc.range(base.age);
-      for (i = 0; i < FLOAT_SAMPLES; i++) others.push(r[0] + (i + 0.5) * (r[1] - r[0]) / FLOAT_SAMPLES);
+    var domain = geneDomain(name, base);
+    var values = domain.values;
+    var span = Math.max(1, values.length - 1);
+    var scored = [];
+    for (var i = 0; i < values.length; i++) {
+      if (values[i] === baseValue) continue;                 // the base is index 0, never an alternative
+      var distance = domain.baseIndex < 0 ? 1 : Math.abs(i - domain.baseIndex) / span;
+      scored.push({ value: values[i], score: distance + rand() * FAR_JITTER });
     }
-    if (others.length > 1) {
-      var offset = riR(rand, 0, others.length - 1);
-      others = others.slice(offset).concat(others.slice(0, offset));
-    }
+    scored.sort(function (a, b) { return b.score - a.score; });
+    var others = [];
+    for (i = 0; i < scored.length; i++) others.push(scored[i].value);
     return [baseValue].concat(others);
+  }
+
+  /* rollStyleGene(g, name, rand) – re-rolls one STYLE_GENES entry uniformly over its
+     whole domain, in place. Style genes have no cross-gene rules in repair(), so the
+     rolled value always survives. */
+  function rollStyleGene(g, name, rand) {
+    var desc = GENES[name];
+    if (!desc) return;
+    if (desc.type === 'num') {
+      var r = desc.range(g.age);
+      g[name] = rfR(rand, r[0], r[1]);
+    } else if (desc.type === 'cat') {
+      g[name] = pickR(rand, desc.values);
+    } else if (desc.type === 'bool') {
+      g[name] = chanceR(rand, 0.5);
+    } else if (desc.type === 'idx') {
+      g[name] = desc.nullable && chanceR(rand, 1 / (desc.n + 1)) ? null : riR(rand, 0, desc.n - 1);
+    }
   }
 
   /* elementVariants(base, step, rand) -> 9 repaired genomes for one identikit step.
      Pure: `base` is never mutated (every candidate is built from a fresh copy).
 
-     - candidate 1 is repair(base) itself, so "keep as is" is always choosable;
-     - candidates 2-9 differ from it ONLY in that step's genes, picked by a mixed-radix
-       walk over each gene's value list (so a big categorical domain gets enumerated
-       across the candidates, while a small one automatically combines with variation
-       in the step's other genes);
-     - every candidate keeps the base's wobbleSeed, which is the determinism contract
-       that makes everything outside the step's element render pixel-identically;
+     - candidate 1 is repair(base) itself – the exact face already on screen, the
+       "keep as is" anchor, with the base's own wobbleSeed and style genes intact;
+     - candidates 2-9 change that step's genes, and outside them may differ only in
+       wobbleSeed and STYLE_GENES (see below). Each step gene walks its far-from-base
+       value list by a mixed-radix counter, so a big domain is sampled without
+       replacement across the panel while a small one automatically combines with
+       variation in the step's other genes;
+     - each of candidates 2-9 gets a FRESH wobbleSeed and independently re-rolls each
+       STYLE_GENES entry with probability STYLE_P. This deliberately gives up the older
+       "everything outside the element is pixel-identical" property: the panel is meant
+       to look like nine sketches of the same person by an artist swapping pens, not
+       nine copies of one bitmap with a patch swapped in. Determinism is untouched –
+       it is a property of a genome (same genome, same pixels), not of a panel;
      - every candidate goes through repair(). If repair reverts a gene this candidate
        meant to vary (child + beard, say, or a big nose on a young face) the candidate
        is rebuilt from the next combination; the same retry covers a candidate that
@@ -969,28 +1037,41 @@
     seen[genomeHash(baseG)] = true;
 
     for (j = 1; j < VARIANT_COUNT; j++) {
+      /* offsets shift ONE gene's digit at a time on a retry, so a rebuild forced by a
+         single illegal gene (noseKind 'big' on a young face) doesn't drag every other
+         step gene off its slot and break the without-replacement spread across the
+         panel. Reset per candidate. */
+      var offsets = [];
+      for (i = 0; i < genes.length; i++) offsets.push(0);
       var accepted = null, firstBuild = null;
       for (t = 0; t < MAX_VARIANT_ATTEMPTS; t++) {
-        var jj = j + t;
         var cand = {};
         for (i = 0; i < GENE_NAMES.length; i++) cand[GENE_NAMES[i]] = baseG[GENE_NAMES[i]];
         var intended = [];
         for (i = 0; i < genes.length; i++) {
           var list = lists[i];
-          var value = list[jj % list.length];
+          var value = list[(j + offsets[i]) % list.length];
           cand[genes[i]] = value;
           intended.push(value);
         }
-        cand.wobbleSeed = baseG.wobbleSeed;    // the determinism contract, restated explicitly
+        cand.wobbleSeed = (rand() * 4294967296) | 0;   // fresh hand for every alternative
+        for (i = 0; i < STYLE_GENES.length; i++) {
+          if (chanceR(rand, STYLE_P)) rollStyleGene(cand, STYLE_GENES[i], rand);
+        }
         var repaired = repair(cand);
         if (firstBuild === null) firstBuild = repaired;
-        var reverted = false;
+        var reverted = [];
         for (i = 0; i < genes.length; i++) {
           // only a gene this candidate actually meant to CHANGE can be "reverted"
-          if (intended[i] !== baseG[genes[i]] && repaired[genes[i]] !== intended[i]) reverted = true;
+          if (intended[i] !== baseG[genes[i]] && repaired[genes[i]] !== intended[i]) reverted.push(i);
         }
         var hash = genomeHash(repaired);
-        if (!reverted && !seen[hash]) { accepted = repaired; break; }
+        if (!reverted.length && !seen[hash]) { accepted = repaired; break; }
+        if (reverted.length) {
+          for (i = 0; i < reverted.length; i++) offsets[reverted[i]]++;
+        } else {
+          offsets[offsets.length - 1]++;   // a duplicate: nudge the last gene only
+        }
       }
       var chosen = accepted || firstBuild;
       seen[genomeHash(chosen)] = true;
@@ -1789,6 +1870,7 @@
     sanitizeJudgeReply: sanitizeJudgeReply,
     initialPopulation: initialPopulation,
     ELEMENT_STEPS: ELEMENT_STEPS,
+    STYLE_GENES: STYLE_GENES,
     elementVariants: elementVariants,
     /* the one member outside the namespace contract: shared utilities the dev pages,
        the probes and the Node checks may lean on. Not part of the app's public surface. */
