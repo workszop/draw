@@ -66,6 +66,16 @@ var JUDGE_PROMPT = 'You are comparing a reference photo (the first image) to a 3
 
 var initialSettings = loadSettings(); // localStorage['draw.settings'] + ['draw.keys'], sane defaults on any failure
 
+/* Task 13 auto-heal (point 1 of 3): a key stored under the wrong provider's slot
+   (e.g. a Gemini key left under openai after a storage wipe + the new openai
+   default) is moved to its matching slot – and the selected provider switched to
+   match – BEFORE App.state is built, so the very first render and the Start gate
+   both already see the corrected shape. window.AI_MODEL_CATALOG.healKeys is pure
+   (see ai-models.js); persisting the result (if it actually healed something)
+   happens once App/saveSettings/saveKeys exist, right below the App object. */
+var initialHeal = window.AI_MODEL_CATALOG.healKeys(initialSettings);
+initialSettings = initialHeal.settings;
+
 var App = {
   state: {
     state: 'idle',        // idle | ready | running | done
@@ -81,6 +91,7 @@ var App = {
                                            // a curated value and hide the custom row out from under the user
     settingsHighlight: false,             // true right after a blocked Start (missing key)
     settingsError: null,                  // message shown in the settings panel
+    settingsKeyNote: null,                // Task 13: info note shown after a paste-time auto-heal moved a key
     runError: null,                       // judge-failure message shown while phase === 'paused'
     generation: 0,
     population: null,      // array of 9 genomes, current generation
@@ -113,6 +124,15 @@ var App = {
   },
 };
 
+/* Task 13 auto-heal, persisted: if healKeys() above actually moved a key, write
+   the corrected settings/keys back to localStorage immediately (before the first
+   render) so the fix survives without the user having to touch anything, and a
+   reload doesn't repeat work loadSettings()+healKeys() already made idempotent. */
+if (initialHeal.healed) {
+  saveSettings();
+  saveKeys();
+}
+
 /* review timer bookkeeping – runtime-only, not part of App.state (nothing here is
    meant to be serializable or rendered from); kept as plain closure vars so the
    timer can never leak across an App.set() re-render. */
@@ -133,6 +153,14 @@ var judgeRetryTimerId = null;
    followed by a fresh Start also re-enters phase 'judging', which an epoch-less guard
    would let a straggling promise from the OLD run sail right through. */
 var judgeEpoch = 0;
+
+/* lastStartKeyWarning (Task 13, auto-heal point 3 of 3) – { provider, key } | null,
+   the last mismatched-key combo Start already warned about and refused to start
+   with. Runtime-only, not App.state (same reasoning as judgeEpoch above): it exists
+   purely so a SECOND Start press with the exact same unchanged key proceeds anyway
+   (patterns are heuristics, not proof – see onStartClick), and must never survive a
+   reload or leak across an unrelated provider/key change, both of which reset it. */
+var lastStartKeyWarning = null;
 
 /* lastDiscoveryKey – per-provider bookkeeping for model discovery (Task 9), same
    "runtime-only, not App.state" reasoning as judgeEpoch above: a plain closure var
@@ -499,6 +527,33 @@ function judge(provider, model, key, photoDataUrl, gridDataUrl) {
   return Promise.reject(new Error('Unknown provider: ' + provider));
 }
 
+/* extractErrorMessage(label, status, rawBody) (Task 13, point 2): OpenAI/Gemini/
+   Claude all wrap a failed request's body in JSON shaped roughly like
+   { error: { message: '...' } } (Gemini) or { error: '...' }; when rawBody parses
+   as JSON and carries that field, surface only that message (truncated to 200
+   chars) instead of the raw JSON fragment the three adapters used to dump
+   straight into the paused status. Falls back to the raw body (still truncated)
+   when it isn't JSON or has no message field, so a non-JSON error page still
+   produces something readable. Never includes the API key – the key is never
+   part of a response body, so there is nothing to redact here. */
+function extractErrorMessage(label, status, rawBody) {
+  var detail = rawBody;
+  try {
+    var parsed = JSON.parse(rawBody);
+    var msg = null;
+    if (parsed && parsed.error) {
+      if (typeof parsed.error.message === 'string') msg = parsed.error.message;
+      else if (typeof parsed.error === 'string') msg = parsed.error;
+    } else if (parsed && typeof parsed.message === 'string') {
+      msg = parsed.message;
+    }
+    if (msg) detail = msg;
+  } catch (e) {
+    // not JSON – fall back to the raw body below
+  }
+  return label + ' request failed (' + status + '): ' + String(detail).slice(0, 200);
+}
+
 function judgeGemini(model, key, photoDataUrl, gridDataUrl) {
   var url = 'https://generativelanguage.googleapis.com/v1beta/models/' +
     encodeURIComponent(model) + ':generateContent';
@@ -518,7 +573,7 @@ function judgeGemini(model, key, photoDataUrl, gridDataUrl) {
   }).then(function (res) {
     if (!res.ok) {
       return res.text().then(function (t) {
-        throw new Error('Gemini request failed (' + res.status + '): ' + t.slice(0, 200));
+        throw new Error(extractErrorMessage('Gemini', res.status, t));
       });
     }
     return res.json();
@@ -551,7 +606,7 @@ function judgeOpenAI(model, key, photoDataUrl, gridDataUrl) {
   }).then(function (res) {
     if (!res.ok) {
       return res.text().then(function (t) {
-        throw new Error('OpenAI request failed (' + res.status + '): ' + t.slice(0, 200));
+        throw new Error(extractErrorMessage('OpenAI', res.status, t));
       });
     }
     return res.json();
@@ -589,7 +644,7 @@ function judgeClaude(model, key, photoDataUrl, gridDataUrl) {
   }).then(function (res) {
     if (!res.ok) {
       return res.text().then(function (t) {
-        throw new Error('Claude request failed (' + res.status + '): ' + t.slice(0, 200));
+        throw new Error(extractErrorMessage('Claude', res.status, t));
       });
     }
     return res.json();
@@ -1144,6 +1199,22 @@ function renderSettingsPanel(s) {
   }
   panel.appendChild(keyRow);
 
+  /* Task 13, item 1 (key-shape guard): live-derived from the current key + provider
+     on every render – not stored in state – so it can never go stale relative to
+     what's actually in the input. Shown only for an UNAMBIGUOUS match to a
+     different provider's pattern; a key matching no pattern at all (garbage, or a
+     format the catalog doesn't know yet) is left alone, since patterns are
+     heuristics, not proof. textContent only, no key value is ever included. */
+  var currentKey = s.keys[s.provider];
+  var likelyProvider = currentKey ? window.AI_MODEL_CATALOG.keyLooksLike(currentKey) : null;
+  if (likelyProvider && likelyProvider !== s.provider) {
+    panel.appendChild(el('p', {
+      class: 'settings-key-warning',
+      text: 'This looks like a ' + PROVIDER_LABELS[likelyProvider] + ' key, but ' +
+        PROVIDER_LABELS[s.provider] + ' is selected.',
+    }));
+  }
+
   panel.appendChild(el('p', {
     class: 'settings-note',
     text: 'Keys stay in this browser (saved to localStorage) and are sent only to the selected provider.',
@@ -1152,6 +1223,13 @@ function renderSettingsPanel(s) {
   // model discovery (Task 9) is triggered from the provider-change/key-change
   // listeners and once at init – never from render() – so it stays a listener/init
   // side effect, not a render-path one (review fix, see maybeDiscoverModels' comment)
+
+  // Task 13, item 1b: info note left by a paste-time auto-heal (onKeyChange) –
+  // distinct from settingsError (which blocks Start) since this one reports a fix
+  // already applied, not a problem still blocking anything.
+  if (s.settingsKeyNote) {
+    panel.appendChild(el('p', { class: 'settings-key-note', text: s.settingsKeyNote }));
+  }
 
   if (s.settingsError) {
     panel.appendChild(el('p', { class: 'settings-error', text: s.settingsError }));
@@ -1353,9 +1431,64 @@ function handlePhotoFile(file) {
   });
 }
 
+/* onStartClick() – Task 13, auto-heal point 3 of 3: before the existing "no key at
+   all" gate, check whether the SELECTED provider's key is shaped for a different
+   provider. If the mismatch is unambiguous AND that other provider's slot is
+   empty, heal it silently (move + switch provider + persist) and start with the
+   corrected provider – no extra click needed. If the mismatch can't be healed
+   cleanly (destination already occupied, or the key matches no known pattern at
+   all), show settingsError and refuse to start – UNLESS this is a second Start
+   press with that exact same (provider, key) pair already warned about, in which
+   case it proceeds: patterns are heuristics, not proof, and the user gets the
+   final say once they've seen the warning. */
 function onStartClick() {
   if (App.state.state !== 'ready') return;
-  var provider = App.state.provider;
+  var s = App.state;
+  var provider = s.provider;
+  var key = s.keys[provider];
+
+  if (key) {
+    var ownPattern = window.AI_MODEL_CATALOG.providers[provider].keyPattern;
+    if (ownPattern && !ownPattern.test(key)) {
+      var likely = window.AI_MODEL_CATALOG.keyLooksLike(key);
+      if (likely) {
+        if (!s.keys[likely]) {
+          // unambiguous match, empty destination – heal silently and proceed
+          var keys = {};
+          for (var k in s.keys) if (Object.prototype.hasOwnProperty.call(s.keys, k)) keys[k] = s.keys[k];
+          keys[likely] = key;
+          keys[provider] = '';
+          provider = likely;
+          App.set({
+            provider: provider, keys: keys,
+            settingsKeyNote: 'That looks like a ' + PROVIDER_LABELS[likely] + ' key - stored it for ' +
+              PROVIDER_LABELS[likely] + ' and switched provider.',
+          });
+          saveSettings();
+          saveKeys();
+          lastStartKeyWarning = null;
+        } else {
+          // destination occupied – can't heal cleanly; warn once, let a second
+          // press with the same unchanged key through
+          var alreadyWarned = lastStartKeyWarning && lastStartKeyWarning.provider === provider &&
+            lastStartKeyWarning.key === key;
+          if (!alreadyWarned) {
+            lastStartKeyWarning = { provider: provider, key: key };
+            App.set({
+              settingsHighlight: true,
+              settingsError: 'This looks like a ' + PROVIDER_LABELS[likely] + ' key, but ' +
+                PROVIDER_LABELS[provider] + ' is selected. Press Start again to use it anyway.',
+            });
+            return;
+          }
+          lastStartKeyWarning = null; // proceeding with it – reset so the next paste is checked fresh
+        }
+      }
+      // likely === null (garbage/unrecognized format): no evidence either way,
+      // proceed normally – patterns are heuristics, not proof.
+    }
+  }
+
   if (!hasKey(provider)) {
     App.set({
       settingsHighlight: true,
@@ -1481,8 +1614,15 @@ function onNewPhotoClick() {
 
 function onProviderChange(provider) {
   if (PROVIDERS.indexOf(provider) < 0) return;
-  App.set({ provider: provider, settingsHighlight: false, settingsError: null, settingsModelCustomMode: false });
+  // Task 13: clear settingsError/settingsKeyNote here too, same as settingsHighlight
+  // already did – otherwise a stale mismatch warning or auto-heal note from the
+  // previous provider would stick around under an unrelated provider's key field.
+  App.set({
+    provider: provider, settingsHighlight: false, settingsError: null, settingsKeyNote: null,
+    settingsModelCustomMode: false,
+  });
   saveSettings();
+  lastStartKeyWarning = null; // switching providers manually invalidates any pending "second press proceeds" state
   maybeDiscoverModels(provider); // Task 9 (review fix): triggered from this listener, not from render()
 }
 
@@ -1495,14 +1635,39 @@ function onModelChange(value) {
   saveSettings();
 }
 
+/* onKeyChange(value) (Task 13, auto-heal point 2 of 3): the key just pasted/typed
+   into the CURRENTLY SELECTED provider's field. If it unambiguously matches a
+   DIFFERENT provider's pattern and that provider's slot is empty, don't honor the
+   literal slot the user typed into – store it under the matching provider instead,
+   switch the selected provider there, and leave a status note explaining what
+   happened. If the matching slot is already occupied, this does NOT silently
+   drop what the user typed: it's kept exactly where they put it, and the plain
+   inline warning (item 1, rendered live in renderSettingsPanel) covers it instead. */
 function onKeyChange(value) {
   var s = App.state;
   var provider = s.provider;
   var keys = {};
   for (var k in s.keys) if (Object.prototype.hasOwnProperty.call(s.keys, k)) keys[k] = s.keys[k];
   keys[provider] = value;
-  App.set({ keys: keys, settingsHighlight: false, settingsError: null });
+
+  var note = null;
+  if (value) {
+    var likely = window.AI_MODEL_CATALOG.keyLooksLike(value);
+    if (likely && likely !== provider && !keys[likely]) {
+      keys[likely] = value;
+      keys[provider] = '';
+      provider = likely;
+      note = 'That looks like a ' + PROVIDER_LABELS[likely] + ' key - stored it for ' +
+        PROVIDER_LABELS[likely] + ' and switched provider.';
+    }
+  }
+
+  App.set({
+    provider: provider, keys: keys, settingsHighlight: false, settingsError: null, settingsKeyNote: note,
+  });
+  saveSettings(); // provider may have changed as part of the heal above
   saveKeys(); // never logged – written straight to localStorage
+  lastStartKeyWarning = null; // a fresh paste invalidates any pending "second press proceeds" state
   maybeDiscoverModels(provider); // Task 9 (review fix): triggered from this listener, not from render()
 }
 

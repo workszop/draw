@@ -205,6 +205,11 @@ body.edu { background: var(--paper); color: var(--ink); font-family: var(--font-
 .settings-row select:focus-visible, .settings-row input:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .settings-note { color: var(--ink-3); font-size: 0.76rem; line-height: 1.5; margin: 8px 0 0; }
 .settings-error { color: var(--marigold-ink); font-size: 0.8rem; margin: 8px 0 0; }
+/* Task 13: key-shape guard warning (non-blocking, under the key field) and the
+   paste-time auto-heal status note – distinct tone from settings-error since
+   neither blocks Start on its own. */
+.settings-key-warning { color: var(--marigold-ink); font-size: 0.76rem; margin: 6px 0 0; }
+.settings-key-note { color: var(--teal-ink); font-size: 0.76rem; margin: 6px 0 0; }
 
 /* model discovery + "Get a key" link (Task 9) */
 .settings-key-link {
