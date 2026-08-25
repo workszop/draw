@@ -127,6 +127,14 @@ body.edu { background: var(--paper); color: var(--ink); font-family: var(--font-
 .header-controls { margin-left: auto; }
 .header-controls-inner { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 
+/* header-photo-actions: Restart + New photo, grouped apart from Start/Pause/Stop
+   with a thin separator when the run controls are also showing (hidden on the
+   done screen, where this group renders alone - no orphan border then). */
+.header-photo-actions { display: flex; align-items: center; gap: 10px; }
+.header-controls-inner.has-run-controls .header-photo-actions {
+  margin-left: 4px; padding-left: 14px; border-left: 1px solid var(--line-2);
+}
+
 .edu-btn {
   font-family: var(--font-display); font-weight: 600; font-size: 14px;
   background: var(--marigold); color: var(--on-primary); border: none;

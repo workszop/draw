@@ -940,10 +940,12 @@ function render() {
 
   if (headerControlsEl) {
     clearEl(headerControlsEl);
-    // review fix: no run controls on the done screen (matches the pre-Task-9
-    // behavior, where the old center-column controls-bar simply wasn't rendered
-    // there) rather than showing three permanently-disabled buttons.
-    if (s.state !== 'done') headerControlsEl.appendChild(renderHeaderControls(s));
+    // review fix: no run controls (Start/Pause/Stop + progress) on the done screen
+    // (matches the pre-Task-9 behavior, where the old center-column controls-bar
+    // simply wasn't rendered there) rather than showing three permanently-disabled
+    // buttons. The Restart/New photo group renders on every state though, done
+    // included – renderHeaderControls handles that split internally.
+    headerControlsEl.appendChild(renderHeaderControls(s));
   }
 
   if (liveEl) liveEl.textContent = computeLiveAnnouncement(s);
@@ -1019,28 +1021,66 @@ function renderReviewBar(s) {
    handlers directly, not via DOM lookups) keeps working unchanged. */
 function renderHeaderControls(s) {
   var wrap = el('div', { class: 'header-controls-inner' });
+  var hasRunControls = s.state !== 'done';
+  if (hasRunControls) wrap.classList.add('has-run-controls');
 
-  var startBtn = el('button', { class: 'edu-btn', type: 'button', text: 'Start' });
-  startBtn.disabled = s.state !== 'ready';
-  startBtn.addEventListener('click', onStartClick);
+  // review fix: run controls (Start/Pause/Stop + progress) hidden on the done
+  // screen; the Restart/New photo group below renders regardless of state.
+  if (hasRunControls) {
+    var startBtn = el('button', { class: 'edu-btn', type: 'button', text: 'Start' });
+    startBtn.disabled = s.state !== 'ready';
+    startBtn.addEventListener('click', onStartClick);
 
-  var pauseLabel = s.phase === 'paused' ? 'Resume' : 'Pause';
-  var pauseBtn = el('button', { class: 'edu-btn ghost', type: 'button', text: pauseLabel });
-  pauseBtn.disabled = s.state !== 'running' || (s.phase !== 'reviewing' && s.phase !== 'paused');
-  pauseBtn.addEventListener('click', onPauseResumeClick);
+    var pauseLabel = s.phase === 'paused' ? 'Resume' : 'Pause';
+    var pauseBtn = el('button', { class: 'edu-btn ghost', type: 'button', text: pauseLabel });
+    pauseBtn.disabled = s.state !== 'running' || (s.phase !== 'reviewing' && s.phase !== 'paused');
+    pauseBtn.addEventListener('click', onPauseResumeClick);
 
-  var stopBtn = el('button', { class: 'edu-btn ghost', type: 'button', text: 'Stop' });
-  stopBtn.disabled = s.state !== 'running';
-  stopBtn.addEventListener('click', onStopClick);
+    var stopBtn = el('button', { class: 'edu-btn ghost', type: 'button', text: 'Stop' });
+    stopBtn.disabled = s.state !== 'running';
+    stopBtn.addEventListener('click', onStopClick);
 
-  wrap.appendChild(startBtn);
-  wrap.appendChild(pauseBtn);
-  wrap.appendChild(stopBtn);
+    wrap.appendChild(startBtn);
+    wrap.appendChild(pauseBtn);
+    wrap.appendChild(stopBtn);
 
-  var progress = renderProgressBar(s);
-  if (progress) wrap.appendChild(progress);
+    var progress = renderProgressBar(s);
+    if (progress) wrap.appendChild(progress);
+  }
+
+  wrap.appendChild(renderHeaderPhotoActions(s));
 
   return wrap;
+}
+
+/* renderHeaderPhotoActions(s): Restart (same photo, fresh gen 1 - reuses
+   onStartOverClick) and New photo (back to idle - reuses onNewPhotoClick), grouped
+   apart from the run controls with a thin separator (see .header-photo-actions in
+   style.css). Restart is enabled mid-run on purpose - that's the point of the
+   request, letting a slow/bad run be restarted without waiting for it to finish.
+   In 'ready' it would just duplicate Start, so it stays disabled there. New photo
+   is enabled anywhere a photo already exists (ready/running/done), disabled only
+   in 'idle' where there's no photo to clear yet. */
+function renderHeaderPhotoActions(s) {
+  var group = el('div', { class: 'header-photo-actions' });
+
+  var restartBtn = el('button', {
+    class: 'edu-btn ghost', type: 'button', text: 'Restart',
+    'aria-label': 'Restart drawing from generation 1, keeping the current photo',
+  });
+  restartBtn.disabled = s.state !== 'running' && s.state !== 'done';
+  restartBtn.addEventListener('click', onStartOverClick);
+
+  var newPhotoBtn = el('button', {
+    class: 'edu-btn ghost', type: 'button', text: 'New photo',
+    'aria-label': 'Clear the current photo and return to upload',
+  });
+  newPhotoBtn.disabled = s.state === 'idle';
+  newPhotoBtn.addEventListener('click', onNewPhotoClick);
+
+  group.appendChild(restartBtn);
+  group.appendChild(newPhotoBtn);
+  return group;
 }
 
 /* renderRunStatus(s) – the one-line phase status ("Judge is looking at the
@@ -1322,8 +1362,8 @@ function renderCell(s, i) {
 }
 
 /* renderDoneCenter(s) – the done screen: 2x final portrait, side-by-side composite
-   (photo left, portrait right, equal heights, paper background), both PNG downloads,
-   Start over (same photo, fresh gen 1) and New photo (back to idle). */
+   (photo left, portrait right, equal heights, paper background), both PNG downloads.
+   Restart/New photo live in the header (renderHeaderPhotoActions), not here. */
 function renderDoneCenter(s) {
   var col = el('div', { class: 'col-center' });
   var panel = el('div', { class: 'panel done-panel' });
@@ -1366,14 +1406,8 @@ function renderDoneCenter(s) {
   }
   actions.appendChild(compositeLink);
 
-  var startOverBtn = el('button', { class: 'edu-btn ghost', type: 'button', text: 'Start over' });
-  startOverBtn.addEventListener('click', onStartOverClick);
-  actions.appendChild(startOverBtn);
-
-  var newPhotoBtn = el('button', { class: 'edu-btn ghost', type: 'button', text: 'New photo' });
-  newPhotoBtn.addEventListener('click', onNewPhotoClick);
-  actions.appendChild(newPhotoBtn);
-
+  // Restart / New photo now live in the header (renderHeaderPhotoActions), grouped
+  // apart from these downloads and visible on every state including 'done'.
   panel.appendChild(actions);
   col.appendChild(panel);
   return col;
