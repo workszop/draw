@@ -872,6 +872,134 @@
     return { population: population, meta: meta };
   }
 
+  // ─── Helpers: element variants (police-composite mode) ───
+
+  /* ELEMENT_STEPS – the identikit build order. One step per facial element; the
+     order matters (the run walks it front to back, locking one element per step).
+     Each entry is { id, label, genes }: `label` is what the judge prompt, the
+     progress indicator and the log line call the element, `genes` is exactly the
+     set of genes elementVariants() is allowed to vary for that step. Every other
+     gene – wobbleSeed above all – is held fixed, which is what makes the 9 grid
+     faces pixel-identical apart from the one element under review. */
+  var ELEMENT_STEPS = [
+    { id: 'persona',     label: 'age and gender',              genes: ['age', 'gender'] },
+    { id: 'face',        label: 'face shape and skin tone',    genes: ['faceShape', 'headW', 'headRatio', 'skinIdx'] },
+    { id: 'hair',        label: 'hair',                        genes: ['hairStyle', 'hairDark', 'hairFillIdx', 'hairTintIdx'] },
+    { id: 'eyes',        label: 'eyes and eyebrows',           genes: ['eyeKind', 'eyeSize', 'eyeGap', 'browKind'] },
+    { id: 'nose',        label: 'nose',                        genes: ['noseKind', 'noseSize'] },
+    { id: 'mouth',       label: 'mouth and expression',        genes: ['mouthKind', 'mouthSize', 'expr'] },
+    { id: 'facial_hair', label: 'facial hair',                 genes: ['stache', 'beard'] },
+    { id: 'details',     label: 'glasses, ears and accessories', genes: ['eyewear', 'earStyle', 'earSize', 'earrings', 'bow'] },
+  ];
+
+  var VARIANT_COUNT = 9;              // candidates per step: 1 "keep as is" + 8 alternatives
+  var FLOAT_SAMPLES = 8;              // even samples a 'num' gene contributes to its value list
+  var MAX_VARIANT_ATTEMPTS = 24;      // bounded rebuild budget per candidate (see elementVariants)
+
+  /* resolveStep(step) -> an ELEMENT_STEPS entry. Accepts the entry itself, its id
+     string, or its index, so callers can pass whichever they already hold. */
+  function resolveStep(step) {
+    if (step && typeof step === 'object' && Array.isArray(step.genes)) return step;
+    for (var i = 0; i < ELEMENT_STEPS.length; i++) {
+      if (ELEMENT_STEPS[i].id === step || i === step) return ELEMENT_STEPS[i];
+    }
+    return ELEMENT_STEPS[0];
+  }
+
+  /* geneValueList(name, base, rand) -> [baseValue, ...alternatives]. Index 0 is
+     always the base's own value, so a mixed-radix digit of 0 means "leave this gene
+     alone". Categorical/bool/idx genes contribute their whole domain (hairStyle only
+     the styles valid for the base's age; a nullable index also offers null); a float
+     gene contributes FLOAT_SAMPLES values spread evenly across its age-valid range.
+     The alternatives are rotated by a random offset so a Restart explores the domain
+     from a different starting point rather than always showing the same 8 first. */
+  function geneValueList(name, base, rand) {
+    var desc = GENES[name];
+    var baseValue = base[name];
+    var others = [];
+    var i;
+    if (!desc) return [baseValue];
+    if (desc.type === 'cat') {
+      var domain = desc.validFor ? desc.validFor(base.age) : desc.values;
+      for (i = 0; i < domain.length; i++) if (domain[i] !== baseValue) others.push(domain[i]);
+    } else if (desc.type === 'bool') {
+      others.push(!baseValue);
+    } else if (desc.type === 'idx') {
+      if (desc.nullable && baseValue !== null) others.push(null);
+      for (i = 0; i < desc.n; i++) if (i !== baseValue) others.push(i);
+    } else if (desc.type === 'num') {
+      var r = desc.range(base.age);
+      for (i = 0; i < FLOAT_SAMPLES; i++) others.push(r[0] + (i + 0.5) * (r[1] - r[0]) / FLOAT_SAMPLES);
+    }
+    if (others.length > 1) {
+      var offset = riR(rand, 0, others.length - 1);
+      others = others.slice(offset).concat(others.slice(0, offset));
+    }
+    return [baseValue].concat(others);
+  }
+
+  /* elementVariants(base, step, rand) -> 9 repaired genomes for one identikit step.
+     Pure: `base` is never mutated (every candidate is built from a fresh copy).
+
+     - candidate 1 is repair(base) itself, so "keep as is" is always choosable;
+     - candidates 2-9 differ from it ONLY in that step's genes, picked by a mixed-radix
+       walk over each gene's value list (so a big categorical domain gets enumerated
+       across the candidates, while a small one automatically combines with variation
+       in the step's other genes);
+     - every candidate keeps the base's wobbleSeed, which is the determinism contract
+       that makes everything outside the step's element render pixel-identically;
+     - every candidate goes through repair(). If repair reverts a gene this candidate
+       meant to vary (child + beard, say, or a big nose on a young face) the candidate
+       is rebuilt from the next combination; the same retry covers a candidate that
+       repairs into a duplicate of one already in the list. The budget is bounded
+       (MAX_VARIANT_ATTEMPTS) and the first build is kept if it runs out, so a step
+       whose whole domain is illegal for this base still yields 9 genomes instead of
+       looping forever. */
+  function elementVariants(base, step, rand) {
+    rand = rand || Math.random;
+    var stepDef = resolveStep(step);
+    var baseG = repair(base);                 // repair() already copies, so `base` is untouched
+    var genes = stepDef.genes;
+    var lists = [];
+    var i, j, t;
+    for (i = 0; i < genes.length; i++) lists.push(geneValueList(genes[i], baseG, rand));
+
+    var out = [baseG];
+    var seen = {};
+    seen[genomeHash(baseG)] = true;
+
+    for (j = 1; j < VARIANT_COUNT; j++) {
+      var accepted = null, firstBuild = null;
+      for (t = 0; t < MAX_VARIANT_ATTEMPTS; t++) {
+        var jj = j + t;
+        var cand = {};
+        for (i = 0; i < GENE_NAMES.length; i++) cand[GENE_NAMES[i]] = baseG[GENE_NAMES[i]];
+        var intended = [];
+        for (i = 0; i < genes.length; i++) {
+          var list = lists[i];
+          var value = list[jj % list.length];
+          cand[genes[i]] = value;
+          intended.push(value);
+        }
+        cand.wobbleSeed = baseG.wobbleSeed;    // the determinism contract, restated explicitly
+        var repaired = repair(cand);
+        if (firstBuild === null) firstBuild = repaired;
+        var reverted = false;
+        for (i = 0; i < genes.length; i++) {
+          // only a gene this candidate actually meant to CHANGE can be "reverted"
+          if (intended[i] !== baseG[genes[i]] && repaired[genes[i]] !== intended[i]) reverted = true;
+        }
+        var hash = genomeHash(repaired);
+        if (!reverted && !seen[hash]) { accepted = repaired; break; }
+      }
+      var chosen = accepted || firstBuild;
+      seen[genomeHash(chosen)] = true;
+      out.push(chosen);
+    }
+
+    return out;
+  }
+
   // ─── Render: the marker box, resolved lazily so genome.js loads without a DOM ───
 
   function C() {
@@ -1660,6 +1788,8 @@
     hintsToGenes: hintsToGenes,
     sanitizeJudgeReply: sanitizeJudgeReply,
     initialPopulation: initialPopulation,
+    ELEMENT_STEPS: ELEMENT_STEPS,
+    elementVariants: elementVariants,
     /* the one member outside the namespace contract: shared utilities the dev pages,
        the probes and the Node checks may lean on. Not part of the app's public surface. */
     _internal: {

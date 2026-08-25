@@ -266,6 +266,81 @@
     };
   }
 
+  /* probe 6 (elements branch): Genome.elementVariants() – the identikit contract, over
+     all 8 ELEMENT_STEPS on 20 random bases each:
+       - exactly 9 candidates, all of them repair no-ops;
+       - candidate 1 deep-equals the base (the always-available "keep as is");
+       - every candidate keeps the base's wobbleSeed (the determinism contract: it is
+         what makes the 9 faces pixel-identical outside the step's element);
+       - no candidate differs from the base in a gene outside the step's set, EXCEPT
+         where repair() itself forces the change (a child face losing its beard, an age
+         change pulling headW back into range). That exception is checked exactly, not
+         waved through: re-merging the candidate's step genes onto the base and
+         repairing must reproduce the candidate gene for gene, so every non-step
+         difference is provably a repair consequence and nothing else;
+       - the base object handed in is not mutated. */
+  function elementVariantContract() {
+    var Genome = window.Genome;
+    var rand = Genome._internal.mulberry32(0x5E1EC7);
+    var geneNames = Genome._internal.GENE_NAMES;
+    var steps = Genome.ELEMENT_STEPS;
+    var runs = 20, fails = [], candidates = 0;
+
+    function hash(g) { return Genome.genomeHash(g); }
+    function sameGenes(a, b) {
+      for (var i = 0; i < geneNames.length; i++) {
+        if (a[geneNames[i]] !== b[geneNames[i]]) return false;
+      }
+      return true;
+    }
+
+    for (var r = 0; r < runs; r++) {
+      var base = Genome.randomGenome(rand);
+      for (var si = 0; si < steps.length; si++) {
+        var step = steps[si];
+        var stepGenes = {};
+        step.genes.forEach(function (n) { stepGenes[n] = true; });
+        var beforeHash = hash(base);
+        var variants = Genome.elementVariants(base, step, rand);
+        var where = 'run ' + r + '/' + step.id + ': ';
+
+        if (hash(base) !== beforeHash) fails.push(where + 'elementVariants mutated its input');
+        if (!Array.isArray(variants) || variants.length !== 9) {
+          fails.push(where + 'expected 9 candidates, got ' + (variants && variants.length));
+          continue;
+        }
+        if (!sameGenes(variants[0], base)) fails.push(where + 'candidate 1 did not equal the base');
+
+        for (var c = 0; c < variants.length; c++) {
+          var g = variants[c];
+          candidates++;
+          if (hash(g) !== hash(Genome.repair(g))) fails.push(where + 'candidate ' + (c + 1) + ' is not repaired');
+          if (g.wobbleSeed !== base.wobbleSeed) fails.push(where + 'candidate ' + (c + 1) + ' changed wobbleSeed');
+
+          /* every non-step difference must be a repair consequence: rebuild the
+             candidate from base + its own step genes and demand an exact match */
+          var merged = {};
+          for (var k = 0; k < geneNames.length; k++) merged[geneNames[k]] = base[geneNames[k]];
+          step.genes.forEach(function (n) { merged[n] = g[n]; });
+          if (!sameGenes(Genome.repair(merged), g)) {
+            var offenders = geneNames.filter(function (n) {
+              return !stepGenes[n] && g[n] !== base[n];
+            });
+            fails.push(where + 'candidate ' + (c + 1) + ' differs outside the step beyond repair (' +
+              (offenders.join(',') || 'step genes themselves') + ')');
+          }
+        }
+      }
+    }
+    return {
+      pass: fails.length === 0,
+      detail: fails.length === 0
+        ? candidates + ' candidates over ' + steps.length + ' steps x ' + runs +
+          ' bases: 9 per step, candidate 1 = base, wobbleSeed held, every non-step diff a repair consequence'
+        : fails.slice(0, 5).join(' | ') + (fails.length > 5 ? ' …(+' + (fails.length - 5) + ' more)' : ''),
+    };
+  }
+
   /* every check carries its descriptive name, so a thrower still reports under it */
   var CHECKS = [
     { name: 'determinism: same genome renders identically', fn: determinism },
@@ -273,6 +348,7 @@
     { name: 'stratification: 50 initialPopulation() calls satisfy §3.5', fn: stratification },
     { name: 'diversity: 9 members, no winner copy, 6/3 split, >=5/6 mutants differ across 3 generations', fn: diversity },
     { name: 'sanitizer: 8 fixture replies parse to expected results', fn: sanitizerFixtures },
+    { name: 'element variants: 9 per step, candidate 1 = base, same wobbleSeed, only the step\'s element varies', fn: elementVariantContract },
   ];
 
   var Probes = {
