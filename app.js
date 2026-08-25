@@ -18,9 +18,33 @@ var PHOTO_JPEG_QUALITY = 0.8;
 var MAX_FILE_BYTES = 20 * 1024 * 1024; // 20 MB – generous guard against pathological uploads
 var CELL_W = 200, CELL_H = 250;          // on-screen grid cell canvas size
 var COMPOSITE_CELL_W = 300, COMPOSITE_CELL_H = 375; // buildGridJpeg() cell size (~300px per spec)
-var MAX_GENERATIONS = 10;
 var REVIEW_MS = 3500;                    // reviewing phase: auto-advance once a winner exists
 var COMPOSITE_GAP = 24;                  // px gap between photo and portrait in the done composite
+
+// ─── Constants: element (police-composite) mode ───
+
+/* ELEMENT_STEPS lives in genome.js next to the gene table it names – app.js only
+   walks it. One step per facial element, in build order; STEP_COUNT is what the
+   progress indicator and the done screen count against (this branch has no
+   generations: the run is a fixed-length walk over these steps). */
+var ELEMENT_STEPS = window.Genome.ELEMENT_STEPS;
+var STEP_COUNT = ELEMENT_STEPS.length;
+
+/* NEUTRAL_BASE – the working genome every run starts from: an adult, neutral,
+   oval-faced, mid-everything face carrying no element the user hasn't picked yet.
+   Deliberately hardcoded (not randomGenome) so step 1 always starts from the same
+   blank slate; only wobbleSeed is randomized per run, which re-rolls the stroke
+   texture without touching a single recognisable trait. */
+var NEUTRAL_BASE = {
+  age: 'adult', gender: 'neutral', expr: 'neutral',
+  hairStyle: 'sidepart', hairDark: true, hairFillIdx: 1, hairTintIdx: null,
+  skinIdx: null, washMode: 'flat', hatWashIdx: null, accentIdx: 0, inkIdx: 0,
+  penW: 1.0, headW: 66, headRatio: 1.1, tilt: 0, faceShape: 'oval', look: 0,
+  eyeKind: 'ring', eyeSize: 1.0, eyeGap: 1.0, browKind: 'arc',
+  noseKind: 'straight', noseSize: 1.0, mouthKind: 'flat', mouthSize: 1.0,
+  earStyle: 'flat', earSize: 1.05, stache: 'none', beard: 'none',
+  eyewear: 'none', bow: false, earrings: 'none', wobbleSeed: 0,
+};
 
 // ─── Constants: AI judge (Task 6, spec §4) ───
 
@@ -51,15 +75,23 @@ var LOG_THUMB_W = 64, LOG_THUMB_H = 80;  // css px; backing canvas is device-pix
    keys so the prompt, the sanitizer (genome.js) and hintsToGenes() can never drift apart. */
 var TRAIT_LIST = Object.keys(window.Genome.HINT_MAP);
 
-var JUDGE_PROMPT = 'You are comparing a reference photo (the first image) to a 3x3 grid of 9 ' +
-  'hand-drawn sketch portraits (the second image; each cell has a number 1-9 in a badge in its ' +
-  'corner). Pick the single sketch whose age, gender presentation, hair, glasses, facial hair and ' +
-  'overall vibe best match the person in the photo. Then give at most ' + MAX_HINTS_REQUESTED +
-  ' hints for how the next generation of sketches could look more like the person, using ONLY ' +
-  'these trait names: ' + TRAIT_LIST.join(', ') + '. ' +
-  'Respond with ONLY this JSON object and nothing else - no markdown fencing, no commentary: ' +
-  '{ "best": <integer 1-9>, "hints": [ { "trait": "<one of the trait names above>", ' +
-  '"suggestion": "<short phrase>" } ] }';
+/* judgePromptFor(label) – the element-mode judge prompt: same strict JSON contract as
+   before, but the question is narrowed to the one element this step varies, since
+   every other feature is pixel-identical across the 9 sketches and comparing them on
+   anything else would be meaningless. Hints are still requested (and still sanitized
+   and logged) so the reply shape and the sanitizer stay unchanged – on this branch
+   they are shown in the log only and bias nothing. */
+function judgePromptFor(label) {
+  return 'You are comparing a reference photo (the first image) to a 3x3 grid of 9 ' +
+    'hand-drawn sketch portraits (the second image; each cell has a number 1-9 in a badge in its ' +
+    'corner). The 9 sketches differ ONLY in the ' + label + '. Pick the sketch whose ' + label +
+    ' best matches the person in the photo. Then give at most ' + MAX_HINTS_REQUESTED +
+    ' hints for how the sketch could look more like the person, using ONLY ' +
+    'these trait names: ' + TRAIT_LIST.join(', ') + '. ' +
+    'Respond with ONLY this JSON object and nothing else - no markdown fencing, no commentary: ' +
+    '{ "best": <integer 1-9>, "hints": [ { "trait": "<one of the trait names above>", ' +
+    '"suggestion": "<short phrase>" } ] }';
+}
 
 /* RETIRED_MODELS (Task 12) – pre-catalog stored model values that predate the current
    curated lists. A stored per-provider model exactly matching its provider's entry
@@ -116,13 +148,14 @@ var App = {
     settingsError: null,                  // message shown in the settings panel
     settingsKeyNote: initialHealNote,     // Task 13: info note shown after a paste- or load-time auto-heal moved a key
     runError: null,                       // judge-failure message shown while phase === 'paused'
-    generation: 0,
-    population: null,      // array of 9 genomes, current generation
+    generation: 0,          // element mode: the 1-based STEP number (the data-generation contract keeps its name)
+    population: null,      // array of 9 genomes, current step's variants
     winner: null,           // 1-9 or null
     winnerSource: null,     // 'ai' | 'manual' | null
     winnerHints: [],         // [{trait, suggestion}] from the AI judge that picked winner (kept across a manual override)
-    currentBestGenome: null, // Phase 10: previous generation's picked winner genome; no grid cell is guaranteed to equal
-                              // it any more (no exact elite), so this is the Stop-before-pick fallback (see onStopClick)
+    workingGenome: null,     // the face locked in so far: NEUTRAL_BASE at step 1, then each picked step's genes
+                              // merged in. Always equals population[0] while a step is on screen ("keep as is"),
+                              // and is the Stop-before-pick fallback (see onStopClick)
     log: [],
     error: null,
     photo: null,             // { previewUrl, jpegDataUrl, width, height } | null
@@ -530,13 +563,15 @@ function dataUrlToBase64(dataUrl) {
   return i >= 0 ? dataUrl.slice(i + 1) : dataUrl;
 }
 
-/* judge(provider, model, key, photoDataUrl, gridDataUrl) -> Promise<string> (raw model
-   text). One adapter per provider behind this single interface; every adapter rejects
+/* judge(provider, model, key, photoDataUrl, gridDataUrl, prompt) -> Promise<string> (raw
+   model text). `prompt` is this step's judgePromptFor() text, passed in rather than read
+   from a module constant since it now changes per element step.
+   One adapter per provider behind this single interface; every adapter rejects
    with a short, non-key-leaking Error on a non-2xx response or an unreadable body. */
-function judge(provider, model, key, photoDataUrl, gridDataUrl) {
-  if (provider === 'gemini') return judgeGemini(model, key, photoDataUrl, gridDataUrl);
-  if (provider === 'openai') return judgeOpenAI(model, key, photoDataUrl, gridDataUrl);
-  if (provider === 'claude') return judgeClaude(model, key, photoDataUrl, gridDataUrl);
+function judge(provider, model, key, photoDataUrl, gridDataUrl, prompt) {
+  if (provider === 'gemini') return judgeGemini(model, key, photoDataUrl, gridDataUrl, prompt);
+  if (provider === 'openai') return judgeOpenAI(model, key, photoDataUrl, gridDataUrl, prompt);
+  if (provider === 'claude') return judgeClaude(model, key, photoDataUrl, gridDataUrl, prompt);
   return Promise.reject(new Error('Unknown provider: ' + provider));
 }
 
@@ -573,13 +608,13 @@ function extractErrorMessage(label, status, rawBody) {
   return label + ' request failed (' + status + '): ' + shown;
 }
 
-function judgeGemini(model, key, photoDataUrl, gridDataUrl) {
+function judgeGemini(model, key, photoDataUrl, gridDataUrl, prompt) {
   var url = 'https://generativelanguage.googleapis.com/v1beta/models/' +
     encodeURIComponent(model) + ':generateContent';
   var body = {
     contents: [{
       parts: [
-        { text: JUDGE_PROMPT },
+        { text: prompt },
         { inline_data: { mime_type: 'image/jpeg', data: dataUrlToBase64(photoDataUrl) } },
         { inline_data: { mime_type: 'image/jpeg', data: dataUrlToBase64(gridDataUrl) } },
       ],
@@ -605,14 +640,14 @@ function judgeGemini(model, key, photoDataUrl, gridDataUrl) {
   });
 }
 
-function judgeOpenAI(model, key, photoDataUrl, gridDataUrl) {
+function judgeOpenAI(model, key, photoDataUrl, gridDataUrl, prompt) {
   var url = 'https://api.openai.com/v1/chat/completions';
   var body = {
     model: model,
     messages: [{
       role: 'user',
       content: [
-        { type: 'text', text: JUDGE_PROMPT },
+        { type: 'text', text: prompt },
         { type: 'image_url', image_url: { url: photoDataUrl } },
         { type: 'image_url', image_url: { url: gridDataUrl } },
       ],
@@ -637,7 +672,7 @@ function judgeOpenAI(model, key, photoDataUrl, gridDataUrl) {
   });
 }
 
-function judgeClaude(model, key, photoDataUrl, gridDataUrl) {
+function judgeClaude(model, key, photoDataUrl, gridDataUrl, prompt) {
   var url = 'https://api.anthropic.com/v1/messages';
   var body = {
     model: model,
@@ -645,7 +680,7 @@ function judgeClaude(model, key, photoDataUrl, gridDataUrl) {
     messages: [{
       role: 'user',
       content: [
-        { type: 'text', text: JUDGE_PROMPT },
+        { type: 'text', text: prompt },
         { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: dataUrlToBase64(photoDataUrl) } },
         { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: dataUrlToBase64(gridDataUrl) } },
       ],
@@ -692,6 +727,51 @@ function makeLogEntry(gen, best, source, hints, detail, genome) {
   };
 }
 
+// ─── Helpers: element steps ───
+
+/* stepAt(stepNumber) -> the 1-based step's ELEMENT_STEPS entry (null out of range).
+   Everything reads the element off the step number already in state rather than
+   keeping a second copy of it, so the two can never disagree. */
+function stepAt(stepNumber) {
+  return ELEMENT_STEPS[stepNumber - 1] || null;
+}
+
+function stepLabel(stepNumber) {
+  var step = stepAt(stepNumber);
+  return step ? step.label : '';
+}
+
+function stepId(stepNumber) {
+  var step = stepAt(stepNumber);
+  return step ? step.id : '';
+}
+
+/* isStepSkipped(stepNumber, genome) – a step whose whole domain is illegal for the
+   working genome is skipped rather than shown as 9 identical faces. The only such
+   case today: repair() forces stache/beard to 'none' on a child face, so the
+   facial-hair step could offer nothing but the face already on screen. */
+function isStepSkipped(stepNumber, genome) {
+  return stepId(stepNumber) === 'facial_hair' && !!genome && genome.age === 'child';
+}
+
+/* mergeStepGenes(working, stepNumber, pickedGenome) – the winner's genes FOR THIS STEP
+   copied onto the working genome, then repaired. Only the step's own genes travel;
+   repair() then re-derives any consequence they force (a child face losing its beard,
+   an age change pulling the head size back into range). Since the picked genome came
+   out of elementVariants(working, step) with the same wobbleSeed, this reproduces that
+   candidate exactly – it is a merge, not an approximation. Never mutates its inputs. */
+function mergeStepGenes(working, stepNumber, pickedGenome) {
+  var step = stepAt(stepNumber);
+  var merged = {};
+  for (var k in working) {
+    if (Object.prototype.hasOwnProperty.call(working, k)) merged[k] = working[k];
+  }
+  if (step) {
+    for (var i = 0; i < step.genes.length; i++) merged[step.genes[i]] = pickedGenome[step.genes[i]];
+  }
+  return window.Genome.repair(merged);
+}
+
 // ─── Helpers: review timer (drives REVIEW_MS auto-advance; Pause/Resume freezes it) ───
 
 function clearReviewTimer() {
@@ -706,7 +786,7 @@ function startReviewTimer(ms) {
   clearReviewTimer();
   var wait = ms === undefined ? REVIEW_MS : ms;
   reviewDeadline = Date.now() + wait;
-  reviewTimerId = window.setTimeout(advanceGeneration, wait);
+  reviewTimerId = window.setTimeout(advanceStep, wait);
 }
 
 // ─── Helpers: judge retry timer (spec §6) ───
@@ -715,12 +795,12 @@ function clearJudgeRetryTimer() {
   if (judgeRetryTimerId !== null) { window.clearTimeout(judgeRetryTimerId); judgeRetryTimerId = null; }
 }
 
-// ─── Helpers: GA loop ───
+// ─── Helpers: the element-step loop ───
 
 /* beginJudging() – enters phase 'judging' for the population already in state and
    fires the first judge attempt under a freshly bumped judgeEpoch. Called right after
-   Start builds generation 1, and again by advanceGeneration() after building each
-   following generation. */
+   Start builds step 1's variants, and again by advanceStep() after building each
+   following step's variants. */
 function beginJudging() {
   judgeEpoch++;
   var epoch = judgeEpoch;
@@ -731,7 +811,7 @@ function beginJudging() {
 /* runJudge(attempt, epoch) – calls the configured provider's adapter, sanitizes the
    reply, and on success sets the AI's pick (source 'ai') with its hints, then starts
    the review timer. attempt is 0 for the first try, 1 for the single retry (spec §6).
-   epoch is the judgeEpoch captured when this attempt's generation started judging.
+   epoch is the judgeEpoch captured when this attempt's step started judging.
    Every branch re-checks BOTH epoch === judgeEpoch and App.state.phase === 'judging'
    before touching state: the phase check alone isn't enough because Stop followed by
    a fresh Start re-enters phase 'judging' too, which would let a straggling promise
@@ -745,6 +825,7 @@ function runJudge(attempt, epoch) {
   var model = s.models[provider];
   var key = s.keys[provider];
   var photoJpeg = s.photo.jpegDataUrl;
+  var prompt = judgePromptFor(stepLabel(s.generation)); // the question is narrowed to THIS step's element
 
   var gridJpeg;
   try {
@@ -754,7 +835,7 @@ function runJudge(attempt, epoch) {
     return;
   }
 
-  judge(provider, model, key, photoJpeg, gridJpeg).then(function (text) {
+  judge(provider, model, key, photoJpeg, gridJpeg, prompt).then(function (text) {
     if (epoch !== judgeEpoch || App.state.phase !== 'judging') return; // stale – a newer run/generation moved on
     var parsed = window.Genome.sanitizeJudgeReply(text);
     if (!parsed) {
@@ -843,10 +924,11 @@ function buildComposite(photo, portraitCanvas, callback) {
   img.src = photo.jpegDataUrl;
 }
 
-/* finishRun(winnerIndex, entry) – common end of the run for both "gen 10 done" and
-   "Stop pressed early": clears the timer, renders the 2x portrait, appends the final
-   log entry, flips state to 'done', then builds the side-by-side composite async. */
-function finishRun(winnerIndex, entry) {
+/* finishRun(winnerIndex, entry, extraEntries) – common end of the run for both "last
+   step done" and "Stop pressed early": clears the timer, renders the 2x portrait,
+   appends the final log entry (plus any trailing skip notes advanceStep hands over in
+   extraEntries), flips state to 'done', then builds the side-by-side composite async. */
+function finishRun(winnerIndex, entry, extraEntries) {
   clearReviewTimer();
   clearJudgeRetryTimer(); // a judge retry must never fire after the run has already ended
   judgeEpoch++; // invalidate any judge Promise still in flight (Stop mid-'judging')
@@ -867,7 +949,7 @@ function finishRun(winnerIndex, entry) {
     portraitDataUrl: portraitDataUrl,
     compositeDataUrl: null,
     runError: null,
-    log: s.log.concat([entry]),
+    log: s.log.concat([entry]).concat(extraEntries || []),
   });
 
   buildComposite(App.state.photo, portraitCanvas, function (compositeDataUrl) {
@@ -876,14 +958,17 @@ function finishRun(winnerIndex, entry) {
   });
 }
 
-/* advanceGeneration() – the winner seeds generation g+1's population via
-   Genome._internal.nextPopulation: 6 guaranteed-different mutants of the winner + 3
-   random immigrants, shuffled, with NO exact copy of the winner in the grid (Phase 10 –
-   the old exact-elite cell 1 stagnated the judge into re-picking the identical image).
-   The winner genome itself is kept as currentBestGenome, the Stop-before-pick fallback
-   (see onStopClick). Fires on REVIEW_MS timeout or an immediate 'enter'. At
-   MAX_GENERATIONS the run ends instead of building g+1. */
-function advanceGeneration() {
+/* advanceStep() – locks this step's element in and moves to the next one. The picked
+   candidate's genes FOR THIS STEP are merged into the working genome (mergeStepGenes),
+   which becomes the base the next step's 9 variants are built from; every other gene,
+   wobbleSeed included, carries over untouched, so the only thing that changes on screen
+   between steps is the element just locked. Fires on REVIEW_MS timeout or an immediate
+   'enter'. After the last step the run ends instead of building another one.
+
+   The AI's hints are kept on the log entry (parsed and sanitized exactly as before) but
+   deliberately bias nothing on this branch: the user – or the judge – picks a whole
+   element, so there is no mutation rate left for a hint to steer. */
+function advanceStep() {
   var s = App.state;
   if (s.state !== 'running' || s.phase !== 'reviewing' || !s.winner) return;
   clearReviewTimer();
@@ -891,25 +976,36 @@ function advanceGeneration() {
   var winnerIndex = s.winner;
   var winnerGenome = s.population[winnerIndex - 1];
   var hints = s.winnerHints || [];
-  var entry = makeLogEntry(s.generation, winnerIndex, s.winnerSource || 'manual', hints, undefined, winnerGenome);
+  var working = mergeStepGenes(s.workingGenome, s.generation, winnerGenome);
+  var entry = makeLogEntry(s.generation, winnerIndex, s.winnerSource || 'manual', hints, undefined, working);
 
-  if (s.generation >= MAX_GENERATIONS) {
-    finishRun(winnerIndex, entry);
+  /* skip any following step that has nothing to offer this face (today: facial hair on
+     a child), leaving a log note so the jump in step numbers is explained. A loop, not
+     an if: skipping the last step has to end the run rather than walk off the table. */
+  var skipped = [];
+  var nextStep = s.generation + 1;
+  while (nextStep <= STEP_COUNT && isStepSkipped(nextStep, working)) {
+    skipped.push(makeLogEntry(nextStep, 0, 'skipped', [], 'nothing to choose for this face', working));
+    nextStep++;
+  }
+
+  if (nextStep > STEP_COUNT) {
+    // the last step's own entry is appended by finishRun, so the skip notes ride along
+    // as its extras rather than being written into the log ahead of it
+    App.set({ workingGenome: working });
+    finishRun(winnerIndex, entry, skipped);
     return;
   }
 
-  var nextGen = s.generation + 1;
-  var hintedGenes = window.Genome.hintsToGenes(hints); // §4.2: winner's hints boost these genes in the mutants below
-  var built = window.Genome._internal.nextPopulation(winnerGenome, nextGen, hintedGenes, Math.random);
   App.set({
-    generation: nextGen,
-    population: built.population,
-    currentBestGenome: winnerGenome, // Stop-before-pick fallback (onStopClick) – no grid cell is guaranteed to match it any more
+    generation: nextStep,
+    population: window.Genome.elementVariants(working, stepAt(nextStep), Math.random),
+    workingGenome: working,
     winner: null,
     winnerSource: null,
     winnerHints: [],
     phase: 'drawing',
-    log: s.log.concat([entry]),
+    log: s.log.concat([entry]).concat(skipped),
   });
   beginJudging();
 }
@@ -923,11 +1019,12 @@ function advanceGeneration() {
    empty string here means nothing new to announce (drawing/judging phases). */
 function computeLiveAnnouncement(s) {
   if (s.state === 'done') {
-    return 'Run finished after generation ' + s.generation + '. Final portrait ready.';
+    return 'Run finished after step ' + s.generation + '. Final portrait ready.';
   }
   if (s.state === 'running' && s.winner) {
     var who = s.winnerSource === 'ai' ? 'AI' : 'you';
-    return 'Generation ' + s.generation + ': face ' + s.winner + ' selected by ' + who + '.';
+    return 'Step ' + s.generation + ', ' + stepLabel(s.generation) + ': face ' + s.winner +
+      ' selected by ' + who + '.';
   }
   return '';
 }
@@ -956,8 +1053,8 @@ function render() {
   if (liveEl) liveEl.textContent = computeLiveAnnouncement(s);
 }
 
-/* renderProgressBar(s) (Task 7) -> "generation g / 10" bar, visible only while a run
-   is actually under way (state 'running'). role="progressbar" + aria-value* so the
+/* renderProgressBar(s) (Task 7) -> the "Step r / 8: element" bar, visible only while a
+   run is actually under way (state 'running'). role="progressbar" + aria-value* so the
    number is exposed to assistive tech as well as read visually. */
 function renderProgressBar(s) {
   if (s.state !== 'running') return null;
@@ -966,16 +1063,19 @@ function renderProgressBar(s) {
     class: 'progress-bar',
     role: 'progressbar',
     'aria-valuemin': '0',
-    'aria-valuemax': String(MAX_GENERATIONS),
+    'aria-valuemax': String(STEP_COUNT),
     'aria-valuenow': String(gen),
-    'aria-label': 'Generation ' + gen + ' of ' + MAX_GENERATIONS,
+    'aria-label': 'Step ' + gen + ' of ' + STEP_COUNT + ': ' + stepLabel(gen),
   });
   var track = el('div', { class: 'progress-bar-fill-track' });
   var fill = el('div', { class: 'progress-bar-fill' });
-  fill.style.width = (Math.min(1, gen / MAX_GENERATIONS) * 100) + '%';
+  fill.style.width = (Math.min(1, gen / STEP_COUNT) * 100) + '%';
   track.appendChild(fill);
   wrap.appendChild(track);
-  var label = el('span', { class: 'progress-bar-label', 'aria-hidden': 'true', text: 'Gen ' + gen + ' / ' + MAX_GENERATIONS });
+  var label = el('span', {
+    class: 'progress-bar-label', 'aria-hidden': 'true',
+    text: 'Step ' + gen + ' / ' + STEP_COUNT + ': ' + stepLabel(gen),
+  });
   wrap.appendChild(label);
   return wrap;
 }
@@ -1018,7 +1118,7 @@ function renderReviewBar(s) {
   return wrap;
 }
 
-/* renderHeaderControls(s) (Task 9): Start/Pause-Resume/Stop + the "Gen g / 10"
+/* renderHeaderControls(s) (Task 9): Start/Pause-Resume/Stop + the "Step r / 8"
    progress bar, rendered into the header's #header-controls slot on every render()
    (moved out of the center column's old controls-bar, per the brief). Same
    enabled/disabled rules and same click handlers as before – only where they render
@@ -1072,7 +1172,7 @@ function renderHeaderPhotoActions(s) {
 
   var restartBtn = el('button', {
     class: 'edu-btn ghost', type: 'button', text: 'Restart',
-    'aria-label': 'Restart drawing from generation 1, keeping the current photo',
+    'aria-label': 'Restart drawing from step 1, keeping the current photo',
   });
   restartBtn.disabled = s.state !== 'running' && s.state !== 'done';
   restartBtn.addEventListener('click', onStartOverClick);
@@ -1303,7 +1403,7 @@ function renderCenterColumn(s) {
 
   var col = el('div', { class: 'col-center' });
 
-  // ── run status (Task 9: Start/Pause/Stop + Gen g/10 moved to the header;
+  // ── run status (Task 9: Start/Pause/Stop + the step progress moved to the header;
   // this one-line phase status stays with the grid, right above the review bar) ──
   var status = renderRunStatus(s);
   if (status) col.appendChild(status);
@@ -1319,9 +1419,10 @@ function renderCenterColumn(s) {
   var grid = el('div', {
     id: 'grid',
     role: 'group',
-    'aria-label': 'Candidate portraits, generation ' + (s.generation || 0),
+    'aria-label': 'Candidate portraits, step ' + (s.generation || 0) + ': ' + stepLabel(s.generation),
   });
-  grid.setAttribute('data-generation', String(s.generation || 0));
+  grid.setAttribute('data-generation', String(s.generation || 0)); // element mode: the step number
+  grid.setAttribute('data-element', stepId(s.generation));         // element mode: this step's element id
   grid.setAttribute('data-winner', s.winner ? String(s.winner) : '');
   grid.setAttribute('data-winner-source', s.winnerSource || '');
 
@@ -1330,7 +1431,7 @@ function renderCenterColumn(s) {
       grid.appendChild(renderCell(s, i));
     }
   } else {
-    grid.appendChild(el('p', { text: 'Upload a photo and press Start to generate the first candidates.' }));
+    grid.appendChild(el('p', { text: 'Upload a photo and press Start to build the first element\u2019s candidates.' }));
   }
   gridPanel.appendChild(grid);
   col.appendChild(gridPanel);
@@ -1373,7 +1474,7 @@ function renderCell(s, i) {
 function renderDoneCenter(s) {
   var col = el('div', { class: 'col-center' });
   var panel = el('div', { class: 'panel done-panel' });
-  panel.appendChild(el('h2', { text: 'Done – generation ' + s.generation + ' of ' + MAX_GENERATIONS }));
+  panel.appendChild(el('h2', { text: 'Done – step ' + s.generation + ' of ' + STEP_COUNT }));
 
   var portraitFig = el('figure', { class: 'done-portrait' });
   var portraitImg = el('img', { alt: 'Final evolved portrait' });
@@ -1444,7 +1545,7 @@ function renderRightColumn(s) {
       var thumbCanvas = buildLogThumbCanvas(entry.genome);
       thumbCanvas.className = 'log-thumb';
       thumbCanvas.setAttribute('role', 'img');
-      thumbCanvas.setAttribute('aria-label', 'Generation ' + entry.gen + ' winner');
+      thumbCanvas.setAttribute('aria-label', 'Step ' + entry.gen + ' face');
       line.appendChild(thumbCanvas);
     }
 
@@ -1453,9 +1554,14 @@ function renderRightColumn(s) {
       ? entry.hints.map(function (h) { return h.trait + ': ' + h.suggestion; }).join(', ')
       : 'none';
     /* textContent only – never innerHTML – so a malformed/adversarial hint suggestion
-       (already truncated + trait-filtered by the sanitizer) can never inject markup. */
-    text.textContent = 'Gen ' + entry.gen + ' – best ' + entry.best + ' (' + entry.source + ')' +
-      ' – hints: ' + hintsText + (entry.detail ? ' – ' + entry.detail : '');
+       (already truncated + trait-filtered by the sanitizer) can never inject markup.
+       A skipped step has no picked face, so it reads as a plain note instead of
+       claiming a candidate number nobody chose. */
+    var head = 'Step ' + entry.gen + ' - ' + stepLabel(entry.gen) + ' - ';
+    text.textContent = entry.source === 'skipped'
+      ? head + 'skipped' + (entry.detail ? ' (' + entry.detail + ')' : '')
+      : head + 'face ' + entry.best + ' (' + entry.source + ')' +
+        ' - hints: ' + hintsText + (entry.detail ? ' - ' + entry.detail : '');
     line.appendChild(text);
 
     log.appendChild(line);
@@ -1550,16 +1656,21 @@ function onStartClick() {
     });
     return;
   }
-  var population = window.Genome.initialPopulation(Math.random);
+  /* the run always starts from NEUTRAL_BASE with a freshly rolled wobbleSeed: the same
+     blank face every time, drawn with a different hand. Step 1's 9 variants are built
+     off it, and each later step is built off whatever the previous one locked in. */
+  var working = window.Genome.repair(Object.assign({}, NEUTRAL_BASE, {
+    wobbleSeed: (Math.random() * 4294967296) | 0,
+  }));
   App.set({
     state: 'running',
     phase: 'drawing',
     generation: 1,
-    population: population,
+    population: window.Genome.elementVariants(working, stepAt(1), Math.random),
+    workingGenome: working,
     winner: null,
     winnerSource: null,
     winnerHints: [],
-    currentBestGenome: null,
     runError: null,
     settingsHighlight: false,
     settingsError: null,
@@ -1589,18 +1700,18 @@ function onStopClick() {
   var s = App.state;
   if (s.state !== 'running') return;
   var picked = !!s.winner;
-  /* Phase 10 (no exact elite): the grid no longer guarantees any cell equals the
-     previous winner, so "no pick yet" can't fall back to cell 1 any more – it falls
-     back to currentBestGenome (the previous generation's picked winner, kept in App
-     state). At generation 1 there is no previous winner yet, so this still falls
-     back to cell 1 (matches the pre-Phase-10 behavior for that one edge case, and
-     winnerIndex 0 signals "not a real grid cell" rather than reusing a misleading 1). */
+  /* Stop with a pick standing locks that element in like a normal advance; Stop before
+     a pick keeps the face exactly as the previous steps left it – workingGenome, which
+     always exists during a run (it is what this step's variants were built from), so
+     there is no "cell 1" guesswork left. winnerIndex 0 signals "not a real grid cell". */
   var winnerIndex = picked ? s.winner : 0;
   var source = picked ? (s.winnerSource || 'manual') : 'manual';
   var hints = picked ? (s.winnerHints || []) : [];
-  var genome = picked ? s.population[s.winner - 1] : (s.currentBestGenome || (s.population && s.population[0]));
+  var genome = picked
+    ? mergeStepGenes(s.workingGenome, s.generation, s.population[s.winner - 1])
+    : (s.workingGenome || (s.population && s.population[0]));
   var entry = makeLogEntry(s.generation, winnerIndex, source, hints,
-    picked ? 'stopped' : 'stopped before a pick – used the previous winner', genome);
+    picked ? 'stopped' : 'stopped before a pick - kept the face as it was', genome);
   finishRun(winnerIndex, entry);
 }
 
@@ -1639,15 +1750,15 @@ function onCellPick(index) {
 }
 
 function onStartOverClick() {
-  // same photo, fresh gen 1: reuse the photo already in state, drop everything else,
-  // then run the exact Start path so gen 1 gets a brand-new initialPopulation()
+  // same photo, fresh step 1: reuse the photo already in state, drop everything else,
+  // then run the exact Start path so step 1 starts from NEUTRAL_BASE with a new wobbleSeed
   clearReviewTimer();
   clearJudgeRetryTimer();
   judgeEpoch++; // invalidate any judge Promise still in flight
   reviewRemainingMs = null;
   App.set({
     state: 'ready', phase: null, population: null, generation: 0,
-    winner: null, winnerSource: null, winnerHints: [], currentBestGenome: null, runError: null, log: [], error: null,
+    winner: null, winnerSource: null, winnerHints: [], workingGenome: null, runError: null, log: [], error: null,
     doneGenome: null, portraitDataUrl: null, compositeDataUrl: null,
   });
   onStartClick();
@@ -1660,7 +1771,7 @@ function onNewPhotoClick() {
   reviewRemainingMs = null;
   App.set({
     state: 'idle', phase: null, population: null, generation: 0,
-    winner: null, winnerSource: null, winnerHints: [], currentBestGenome: null, runError: null, log: [], error: null, photo: null,
+    winner: null, winnerSource: null, winnerHints: [], workingGenome: null, runError: null, log: [], error: null, photo: null,
     doneGenome: null, portraitDataUrl: null, compositeDataUrl: null,
   });
 }
@@ -1793,7 +1904,7 @@ function onKeyChange(value) {
       }
     } else if (ev.key === 'Enter') {
       if (ownedByFocusedControl) return; // the focused button/cell already handles its own Enter
-      if (s.winner) { ev.preventDefault(); advanceGeneration(); }
+      if (s.winner) { ev.preventDefault(); advanceStep(); }
     }
   });
 
