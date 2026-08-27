@@ -144,6 +144,7 @@ var App = {
     state: 'idle',        // idle | ready | running | done
     phase: null,           // null | drawing | judging | reviewing | paused
     provider: initialSettings.provider,   // 'gemini' | 'openai' | 'claude'
+    manualMode: false,     // true while the current run was started with Manual: AI judge off, the user picks every cell
     models: initialSettings.models,       // { gemini, openai, claude } model name text
     keys: initialSettings.keys,           // { gemini, openai, claude } API key text – never logged
     discovered: providerMap(function () { return []; }), // Task 9: extra model IDs discovered per provider (non-curated only), runtime-only
@@ -846,6 +847,20 @@ function clearJudgeRetryTimer() {
    Start builds step 1's variants, and again by advanceStep() after building each
    following step's variants. */
 function beginJudging() {
+  /* A manual run: no judge at all. The panel goes straight to phase 'reviewing' with no
+     winner, which is already a fully-supported state (it is where a judge failure
+     lands): the status line asks for a pick, onCellPick sets a manual winner and starts
+     the review countdown, Enter/timeout advance as usual. judgeEpoch is still bumped so
+     any straggling reply from an earlier AI run is dropped. */
+  if (App.state.manualMode) {
+    judgeEpoch++;
+    if (App.state.phase === 'paused') {
+      App.set({ pausedFrom: null, pendingJudge: null });   // Resume lands in reviewing
+      return;
+    }
+    App.set({ phase: 'reviewing', runError: null, pendingJudge: null, pausedFrom: null });
+    return;
+  }
   /* Pause can in principle land in phase 'drawing'. In practice it cannot: advanceStep
      and Start both build the panel and call this in the same synchronous tick, so there
      is no moment for a click in between. The guard is here anyway, and costs nothing –
@@ -1149,6 +1164,7 @@ function render() {
   appEl.setAttribute('data-state', s.state);
   appEl.setAttribute('data-phase', s.phase || '');
   appEl.setAttribute('data-provider', s.provider);
+  appEl.setAttribute('data-manual', s.manualMode ? 'true' : 'false');
 
   clearEl(appEl);
   appEl.appendChild(renderLeftColumn(s));
@@ -1267,7 +1283,20 @@ function renderHeaderControls(s) {
     stopBtn.disabled = s.state !== 'running';
     stopBtn.addEventListener('click', onStopClick);
 
+    /* Manual: a second start button – same gate as Start, but the run it starts has
+       the AI judge off and the user picks every cell. Highlighted (not clickable)
+       while a manual run is under way, so the mode stays visible. */
+    var manualActive = s.manualMode && s.state !== 'ready';
+    var manualBtn = el('button', {
+      class: 'edu-btn ghost manual-toggle' + (manualActive ? ' is-on' : ''), type: 'button', text: 'Manual',
+      'aria-label': 'Start a manual run - AI judge off, you pick every sketch',
+      title: 'Start a run without the AI judge and pick every sketch yourself. No API key needed.',
+    });
+    manualBtn.disabled = s.state !== 'ready';
+    manualBtn.addEventListener('click', onManualStartClick);
+
     wrap.appendChild(startBtn);
+    wrap.appendChild(manualBtn);
     wrap.appendChild(pauseBtn);
     wrap.appendChild(stopBtn);
 
@@ -1340,7 +1369,8 @@ function renderRunStatus(s) {
     status.textContent = 'Winner picked' + (s.winnerSource === 'ai' ? ' by the judge' : '') +
       ' – advancing soon (press Enter now)';
   } else {
-    status.textContent = 'Pick a candidate: click a cell, or press 1-9 / 0 / - / =';
+    status.textContent = (s.manualMode ? 'Manual - pick the best match for the photo' : 'Pick a candidate') +
+      ': click a cell, or press 1-9 / 0 / - / =';
   }
   return status;
 }
@@ -1412,6 +1442,13 @@ function renderSettingsPanel(s) {
     class: 'panel settings-panel' + (s.settingsHighlight ? ' is-highlighted' : ''),
   });
   panel.appendChild(el('h2', { text: 'Settings' }));
+
+  if (s.manualMode && s.state === 'running') {
+    panel.appendChild(el('p', {
+      class: 'settings-note settings-manual-note',
+      text: 'This is a manual run - the AI judge is off, and the provider, model and API key below are not used.',
+    }));
+  }
 
   var catalogProvider = window.AI_MODEL_CATALOG.providers[s.provider];
 
@@ -1564,7 +1601,13 @@ function renderCenterColumn(s) {
       grid.appendChild(renderCell(s, i));
     }
   } else {
-    grid.appendChild(el('p', { text: 'Upload a photo and press Start to build the first element\u2019s candidates.' }));
+    /* the empty-grid message tracks the actual state: telling a user who has already
+       uploaded to "upload a photo" made the next step (Start/Manual) easy to miss */
+    grid.appendChild(el('p', {
+      text: s.state === 'ready'
+        ? 'Photo loaded - press Start for an AI-judged run, or Manual to pick every sketch yourself.'
+        : 'Upload a photo, then press Start or Manual to draw the first candidates.',
+    }));
   }
   gridPanel.appendChild(grid);
   col.appendChild(gridPanel);
@@ -1742,13 +1785,20 @@ function handlePhotoFile(file) {
    press with that exact same (provider, key) pair already warned about, in which
    case it proceeds: patterns are heuristics, not proof, and the user gets the
    final say once they've seen the warning. */
-function onStartClick() {
+function onStartClick() { startRun(false); }
+
+/* the Manual button: starts a run exactly like Start, but with the AI judge off – the
+   user picks every cell themselves. No provider, model or key is needed or checked. */
+function onManualStartClick() { startRun(true); }
+
+function startRun(manual) {
   if (App.state.state !== 'ready') return;
   var s = App.state;
   var provider = s.provider;
   var key = s.keys[provider];
 
-  if (key) {
+  /* a manual run needs no provider at all: skip the key heal/warning and the key gate */
+  if (key && !manual) {
     var ownPattern = window.AI_MODEL_CATALOG.providers[provider].keyPattern;
     if (ownPattern && !ownPattern.test(key)) {
       var likely = window.AI_MODEL_CATALOG.keyLooksLike(key);
@@ -1790,10 +1840,10 @@ function onStartClick() {
     }
   }
 
-  if (!hasKey(provider)) {
+  if (!manual && !hasKey(provider)) {
     App.set({
       settingsHighlight: true,
-      settingsError: 'Add an API key for ' + PROVIDER_LABELS[provider] + ' to start a run.',
+      settingsError: 'Add an API key for ' + PROVIDER_LABELS[provider] + ' to start a run, or press Manual to pick every sketch yourself.',
     });
     return;
   }
@@ -1805,6 +1855,7 @@ function onStartClick() {
   }));
   var firstPanel = window.Genome.elementVariants(working, stepAt(1), Math.random);
   App.set({
+    manualMode: manual,
     state: 'running',
     phase: 'drawing',
     generation: 1,
@@ -1984,7 +2035,9 @@ function onCellPick(index) {
 
 function onStartOverClick() {
   // same photo, fresh step 1: reuse the photo already in state, drop everything else,
-  // then run the exact Start path so step 1 starts from NEUTRAL_BASE with a new wobbleSeed
+  // then run the exact Start path so step 1 starts from NEUTRAL_BASE with a new wobbleSeed.
+  // A manual run restarts as a manual run, an AI run as an AI run.
+  var manual = App.state.manualMode;
   clearReviewTimer();
   clearJudgeRetryTimer();
   judgeEpoch++; // invalidate any judge Promise still in flight
@@ -1995,7 +2048,7 @@ function onStartOverClick() {
     pausedFrom: null, pendingJudge: null,
     doneGenome: null, portraitDataUrl: null, portraitTransparentDataUrl: null, compositeDataUrl: null,
   });
-  onStartClick();
+  startRun(manual);
 }
 
 function onNewPhotoClick() {

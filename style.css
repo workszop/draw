@@ -147,6 +147,9 @@ body.edu { background: var(--paper); color: var(--ink); font-family: var(--font-
 .edu-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 .edu-btn.ghost { background: var(--surface); color: var(--ink); border: 1px solid var(--line-2); }
 .edu-btn.ghost:hover:not(:disabled) { background: var(--paper-2); }
+/* the Manual start button; .is-on marks a manual run in progress */
+.edu-btn.manual-toggle.is-on { background: var(--teal-soft); color: var(--teal-ink); border-color: var(--teal); }
+.edu-btn.manual-toggle.is-on:disabled { opacity: 1; cursor: default; }
 
 #app {
   display: grid;
