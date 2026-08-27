@@ -23,7 +23,8 @@
   var EXPRS = ['neutral', 'happy', 'surprised', 'sleepy', 'grumpy', 'sly'];
   var HAIR_STYLES = ['bowl', 'bangs', 'sidepart', 'long', 'bob', 'bun', 'afro', 'pigtails',
     'ponytail', 'braids', 'spiky', 'shaggy', 'curly', 'buzz', 'comb', 'bald', 'wisps',
-    'mohawk', 'band', 'cap', 'beanie', 'fedora', 'beret', 'headscarf'];
+    'mohawk', 'band', 'cap', 'beanie', 'fedora', 'beret', 'headscarf',
+    'wavy', 'halfup', 'sidebraid'];
   var HAT_STYLES = ['cap', 'beanie', 'fedora', 'beret', 'headscarf'];
   var NO_BOW_STYLES = ['bald', 'wisps', 'buzz', 'mohawk', 'band'];
   var WASH_MODES = ['flat', 'scribble'];
@@ -31,9 +32,10 @@
   var EYE_KINDS = ['ring', 'big', 'dot', 'mix'];
   var BROW_KINDS = ['none', 'arc', 'thick'];
   var NOSE_KINDS = ['hook', 'button', 'straight', 'big'];
-  var MOUTH_KINDS = ['flat', 'smile', 'lips', 'open', 'frown', 'pout', 'grin'];
+  var MOUTH_KINDS = ['flat', 'smile', 'lips', 'open', 'frown', 'pout', 'grin', 'full', 'heart'];
   var STACHES = ['none', 'thin', 'bushy', 'handlebar', 'walrus'];
-  var BEARDS = ['none', 'stubble', 'goatee', 'full'];
+  /* ordered by amount of beard, so the "more"/"less" hint stepping stays meaningful */
+  var BEARDS = ['none', 'stubble', 'chinstrap', 'goatee', 'mutton', 'full'];
   var EYEWEARS = ['none', 'round', 'square', 'shades', 'halfmoon', 'pince', 'monocle', 'cateye'];
   var EARRINGS = ['none', 'stud', 'hoop', 'drop'];
   /* Phase 9 (spec §12): identity-relevant portrait genes. faceShape drives the jaw
@@ -93,6 +95,7 @@
     if (isChild) {
       add('bowl', 3); add('spiky', 2); add('bangs', 2.5); add('buzz', 0.8); add('mohawk', 0.3);
       add('pigtails', 3 * soft); add('bob', 2 * soft); add('braids', 1.5 * soft); add('ponytail', 1.5 * soft); add('long', 1 * soft);
+      add('wavy', 0.8 * soft); add('sidebraid', 0.6 * soft);
     } else if (isOld) {
       add('bald', 3 * rough); add('comb', 2 * rough); add('wisps', 2); add('fedora', 1); add('beret', 0.5); add('cap', 0.6);
       add('bun', 3 * soft); add('bob', 1.5 * soft); add('headscarf', 1.5 * soft); add('long', 0.6 * soft); add('curly', 1.5 * soft);
@@ -101,6 +104,7 @@
       add('mohawk', 0.35); add('fedora', 0.5); add('beret', 0.5); add('bald', 0.8 * rough);
       add('long', 3 * soft); add('bob', 2.5 * soft); add('bun', 1.5 * soft); add('ponytail', 2 * soft);
       add('braids', 1.5 * soft); add('pigtails', 0.3 * soft); add('headscarf', 0.8 * soft); add('bangs', 1 * soft);
+      add('wavy', 2 * soft); add('halfup', 1.5 * soft); add('sidebraid', 1.2 * soft);
     }
     return t;
   }
@@ -109,12 +113,12 @@
   AGES.forEach(function (age) { HAIR_VALID[age] = Object.keys(hairTable(age, 1, 1)); });
 
   /* hair_length hint (spec §4.2): the subsets mutate() re-picks from for "longer"/"shorter" */
-  var HAIR_LONG = ['long', 'bob', 'afro', 'pigtails', 'ponytail', 'braids', 'shaggy', 'curly'];
+  var HAIR_LONG = ['long', 'bob', 'afro', 'pigtails', 'ponytail', 'braids', 'shaggy', 'curly', 'wavy', 'halfup', 'sidebraid'];
   var HAIR_SHORT = ['buzz', 'spiky', 'bowl', 'comb', 'sidepart', 'bald', 'wisps'];
 
   /* stratification archetype (spec §3.5) for initialPopulation: every hairStyle falls
      into exactly one of three coverage buckets, distinct from the hint subsets above. */
-  var HAIR_ARCHETYPE_LONG = ['long', 'bob', 'bun', 'afro', 'pigtails', 'ponytail', 'braids', 'shaggy', 'curly'];
+  var HAIR_ARCHETYPE_LONG = ['long', 'bob', 'bun', 'afro', 'pigtails', 'ponytail', 'braids', 'shaggy', 'curly', 'wavy', 'halfup', 'sidebraid'];
   var HAIR_ARCHETYPE_HAT = ['bald', 'wisps', 'mohawk', 'band', 'cap', 'beanie', 'fedora', 'beret', 'headscarf'];
   function hairArchetype(style) {
     if (inList(style, HAIR_ARCHETYPE_LONG)) return 'long';
@@ -154,7 +158,7 @@
     hairStyle:   { type: 'cat', values: HAIR_STYLES, validFor: function (age) { return HAIR_VALID[age] || HAIR_VALID.adult; } },
     hairDark:    { type: 'bool' },
     hairFillIdx: { type: 'idx', n: 4, ordered: true },
-    hairTintIdx: { type: 'idx', n: 4, nullable: true, ordered: true },
+    hairTintIdx: { type: 'idx', n: 5, nullable: true, ordered: true },
     skinIdx:     { type: 'idx', n: 7, nullable: true, ordered: true },
     washMode:    { type: 'cat', values: WASH_MODES },
     hatWashIdx:  { type: 'idx', n: 5, nullable: true, ordered: true },
@@ -269,7 +273,7 @@
     if (g.skinIdx === undefined) g.skinIdx = null;
     if (g.hatWashIdx === undefined) g.hatWashIdx = null;
     if (!idxOk(g.hairFillIdx, 4)) g.hairFillIdx = riR(rand, 0, 3);
-    if (g.hairTintIdx !== null && !idxOk(g.hairTintIdx, 4)) g.hairTintIdx = riR(rand, 0, 3);
+    if (g.hairTintIdx !== null && !idxOk(g.hairTintIdx, 5)) g.hairTintIdx = riR(rand, 0, 4);
     if (g.skinIdx !== null && !idxOk(g.skinIdx, 7)) g.skinIdx = riR(rand, 0, 6);
     if (g.hatWashIdx !== null && !idxOk(g.hatWashIdx, 5)) g.hatWashIdx = riR(rand, 0, 4);
     if (!idxOk(g.accentIdx, 3)) g.accentIdx = riR(rand, 0, 2);
@@ -330,7 +334,7 @@
     var skinIdx = coloured && chanceR(rand, 0.85) ? riR(rand, 0, 6) : null;
     var washMode = chanceR(rand, 0.32) ? 'scribble' : 'flat';
     var hairFillIdx = riR(rand, 0, 3);
-    var hairTintIdx = (coloured || chanceR(rand, 0.3)) && chanceR(rand, 0.7) ? riR(rand, 0, 3) : null;
+    var hairTintIdx = (coloured || chanceR(rand, 0.3)) && chanceR(rand, 0.7) ? riR(rand, 0, 4) : null;
     var hatWashIdx = (coloured || chanceR(rand, 0.35)) ? riR(rand, 0, 4) : null;
 
     var g = {
@@ -360,15 +364,16 @@
       browKind: wpickR(rand, { none: isChild ? 2 : 1.2, arc: 3, thick: 0.4 + 2.2 * rough }),
       noseKind: wpickR(rand, { hook: 3, button: isChild ? 3 : 0.3 + 1.5 * soft, straight: 1, big: isOld ? 1.5 * rough : 0 }),
       noseSize: rfR(rand, NOSE_SIZE_RANGE[0], NOSE_SIZE_RANGE[1]),
-      mouthKind: wpickR(rand, { flat: 2, smile: 1.5, lips: 1, open: 0.7, frown: 0.7, pout: 1.2 * soft, grin: isChild ? 1 : 0.4 }),
+      mouthKind: wpickR(rand, { flat: 2, smile: 1.5, lips: 1, open: 0.7, frown: 0.7, pout: 1.2 * soft, grin: isChild ? 1 : 0.4,
+        full: (isChild ? 0.2 : 1.1) * soft, heart: (isChild ? 0.1 : 0.5) * soft }),
       mouthSize: rfR(rand, MOUTH_SIZE_RANGE[0], MOUTH_SIZE_RANGE[1]),
       /* 55/45 out/flat – the same odds the drawing used to roll for itself */
       earStyle: chanceR(rand, 0.55) ? 'out' : 'flat',
       earSize: rfR(rand, EAR_SIZE_RANGE[0], EAR_SIZE_RANGE[1]),
       stache: (!isChild && chanceR(rand, 0.45 * rough))
         ? wpickR(rand, { thin: 1, bushy: 1, handlebar: 0.6, walrus: isOld ? 1 : 0.2 }) : 'none',
-      beard: (!isChild && chanceR(rand, 0.4 * rough))
-        ? wpickR(rand, { stubble: 1.2, goatee: 1, full: 1 }) : 'none',
+      beard: (!isChild && chanceR(rand, 0.5 * rough))
+        ? wpickR(rand, { stubble: 1.2, goatee: 1, full: 1, chinstrap: 0.7, mutton: isOld ? 0.8 : 0.35 }) : 'none',
       eyewear: wpickR(rand, isChild ? { none: 7, round: 1, square: 0.3 }
         : isOld ? { none: 2.5, round: 2, square: 1.2, halfmoon: 2, pince: 0.4, monocle: 0.4 }
           : { none: 5, round: 1, square: 1, shades: 0.8, monocle: 0.25, pince: 0.25, cateye: soft }),
@@ -432,8 +437,9 @@
   }
   /* step an idx gene 1-2 slots toward the hinted end (sign +1 = "darker"/higher index).
      A null current (uncoloured) starts from the middle of the array before stepping.
-     Used for hairFillIdx/hairTintIdx only – hair-1..4 / tint-1..4 are stylistic
-     variation tokens (not a lightness ramp), so "darker" is just a judgment-call
+     Used for hairFillIdx/hairTintIdx only – hair-1..4 / tint-1..5 are stylistic
+     variation tokens (not a lightness ramp; tint-1 is the blond yellow, so at least
+     the light end of the convention is real), so "darker" is just a judgment-call
      convention (increasing raw index = darker), documented here for consistency
      with skinIdx below. skinIdx itself is NOT raw-index-ordered (see
      SKIN_DARKNESS_ORDER + stepSkinIdxToward) because the --skin-1..7 tokens are not
@@ -1262,7 +1268,7 @@
       COLORS = {
         SKINS: toks('--skin', 7),
         HAIR_DARK: toks('--hair', 4),
-        HAIR_TINT: toks('--tint', 4),
+        HAIR_TINT: toks('--tint', 5),
         HATS: toks('--hat', 5),
         ACCENTS: toks('--accent', 3),
         BLUSH: tok('--blush'),
@@ -1357,14 +1363,24 @@
     for (var k = -1; k <= 1; k++) line(x1, y1, x1 + dx / L * 12 + nx * k * 5, y1 + dy / L * 12 + ny * k * 5, { width: 1.4 });
   }
 
-  /* hair on the forehead: yAt(t) gives the hairline for t in [-1,1] across the head */
-  function fringe(F, yAt, filled, sweep) {
+  /* hair on the forehead: yAt(t) gives the hairline for t in [-1,1] across the head.
+     `jagged` swaps the smooth hem for choppy strand tips – a straight dark edge
+     across the whole forehead used to read as a head-wrap, not as bangs. */
+  function fringe(F, yAt, filled, sweep, jagged) {
     sweep = sweep || 0;
     var cx = F.cx, cy = F.cy, hairFill = F.hairFill, hairTint = F.hairTint, rx = F.rx, ry = F.ry;
     clipHead(F, function () {
-      var edge = [];
-      for (var i = 0; i <= 8; i++) { var t = -1 + i / 4; edge.push([cx + t * rx * 1.25, yAt(t) + rf(-3, 3)]); }
-      if (filled && chance(0.35)) {               // scribbled dark hair: two directions of dense hatch
+      var edge = [], i, t;
+      if (jagged) {
+        var teeth = ri(11, 15);
+        for (i = 0; i <= teeth; i++) {
+          t = -1 + 2 * i / teeth;
+          edge.push([cx + t * rx * 1.25, yAt(t) + (i % 2 ? rf(3, 9) : rf(-4, 0))]);
+        }
+      } else {
+        for (i = 0; i <= 8; i++) { t = -1 + i / 4; edge.push([cx + t * rx * 1.25, yAt(t) + rf(-3, 3)]); }
+      }
+      if (filled && !jagged && chance(0.35)) {    // scribbled dark hair: two directions of dense hatch
         var closedEdge = edge.concat([[cx + rx * 1.3, cy - ry * 1.6], [cx - rx * 1.3, cy - ry * 1.6]]);
         washPts(closedEdge, { color: hairFill, alpha: rf(0.25, 0.45), mode: 'flat', grow: 1 });
         sketch(edge, { wob: 1.5, width: 2.2 });
@@ -1374,10 +1390,10 @@
       } else if (filled) {
         edge.push([cx + rx * 1.3, cy - ry * 1.6], [cx - rx * 1.3, cy - ry * 1.6]);
         sketch(edge, { closed: true, fill: true, fillColor: hairFill, wob: 1.5, width: 2 });
-        if (chance(0.5))                          // shine lines in the black
-          for (var j = 0; j < 3; j++) {
-            var x = cx + rf(-rx * 0.5, rx * 0.5);
-            line(x, cy - ry * 0.95, x + rf(-4, 4), yAt(0) - rf(8, 16), { wob: 0.6, width: 1.4, color: pen.base });
+        if (jagged || chance(0.5))                // strand partings / shine lines in the black
+          for (var j = 0, nj = jagged ? ri(4, 6) : 3; j < nj; j++) {
+            var x = cx + rf(-rx * 0.6, rx * 0.6);
+            line(x, cy - ry * 0.95, x + rf(-4, 4), yAt(0) - rf(4, 14), { wob: 0.6, width: 1.4, color: pen.base });
           }
       } else {
         if (hairTint) washPts(edge.concat([[cx + rx * 1.3, cy - ry * 1.6], [cx - rx * 1.3, cy - ry * 1.6]]), hairTint);
@@ -1413,6 +1429,24 @@
       });
       if (!dark) stipple(cx, cy - ry * 0.3, rx * 1.25, ry * 1.1, ri(150, 300), 1.1);
     }
+    else if (style === 'wavy') {
+      hairCurtain(F, rf(1.15, 1.45));
+      /* stacked S-hooks down each side turn the straight curtain into waves */
+      [-1, 1].forEach(function (s) {
+        for (var w = 0, nW = ri(2, 4); w < nW; w++) {
+          var wx = cx + s * rx * rf(1.04, 1.2);
+          var wy = cy + ry * (-0.1 + 0.36 * w + rf(-0.06, 0.06));
+          arc(wx, wy, rf(5, 9), s > 0 ? Math.PI * 0.4 : Math.PI * 1.4, s > 0 ? Math.PI * 1.6 : Math.PI * 2.6,
+            { width: 1.4, wob: 0.8, color: dark ? pen.base : pen.ink });
+        }
+      });
+    }
+    else if (style === 'halfup') hairCurtain(F, rf(0.75, 1.05));
+    else if (style === 'sidebraid') {
+      hairCurtain(F, rf(0.45, 0.6));
+      var sSb = pick([-1, 1]);
+      braid(F, cx + sSb * rx * 0.8, cy + ry * 0.45, cx + sSb * rx * rf(0.95, 1.15), cy + ry * rf(1.45, 1.75));
+    }
     else if (style === 'pigtails') [-1, 1].forEach(function (s) { tail(F, cx + s * rx * 0.92, cy - ry * 0.05, cx + s * rx * rf(1.15, 1.3), cy + ry * rf(0.7, 1.0), rf(14, 20)); });
     else if (style === 'ponytail') { var s2 = pick([-1, 1]); tail(F, cx + s2 * rx * 0.8, cy - ry * 0.7, cx + s2 * rx * rf(1.2, 1.35), cy + ry * rf(0.5, 1.0), rf(16, 22)); }
     else if (style === 'braids') [-1, 1].forEach(function (s) { braid(F, cx + s * rx * 0.9, cy - ry * 0.05, cx + s * rx * rf(1.1, 1.25), cy + ry * rf(1.0, 1.3)); });
@@ -1428,7 +1462,7 @@
   function faceNeck(F) {
     var accent = F.accent, cx = F.cx, cy = F.cy, isChild = F.isChild, isOld = F.isOld, masc = F.masc,
       rough = F.rough, rx = F.rx, ry = F.ry, soft = F.soft, style = F.style;
-    var hairBelowChin = ['long', 'pigtails', 'braids'].indexOf(style) >= 0;
+    var hairBelowChin = ['long', 'pigtails', 'braids', 'wavy', 'sidebraid'].indexOf(style) >= 0;
     if (!hairBelowChin && chance(0.4)) {
       var chinY = cy + ry * 0.98, nW = rx * (isChild ? 0.25 : masc ? 0.38 : 0.3);
       var ny2 = chinY + ry * rf(0.12, 0.2), shW = rx * rf(1.15, 1.3);
@@ -1462,12 +1496,32 @@
       rx = F.rx, ry = F.ry, sidePart = F.sidePart, soft = F.soft, style = F.style;
     var i, n, t, x, y;
     if (style === 'bowl') fringe(F, flatLine, true);
-    else if (style === 'bangs') fringe(F, bangsLine, dark);
+    else if (style === 'bangs') {
+      /* a crown of hair that overhangs the head silhouette: with the fringe clipped
+         to the head, bangs used to sit dead flush with the skull and the smooth hem
+         read as a head-wrap. The overhang plus the choppy hem reads as hair. */
+      var hemY = bangsLine(0) - 8;
+      var domeB = arcPts(cx, cy - ry * 0.08, rx * 1.08, ry * 1.06, Math.PI * 0.94, Math.PI * 2.06, 0.05, 14);
+      if (dark) {
+        sketch(domeB.concat([[cx + rx * 0.85, hemY], [cx - rx * 0.85, hemY]]),
+          { closed: true, fill: true, fillColor: hairFill, wob: 1.6, width: 2.2 });
+      } else {
+        if (hairTint) washPts(domeB.concat([[cx + rx * 0.85, hemY], [cx - rx * 0.85, hemY]]), hairTint);
+        sketch(domeB, { wob: 1.6, width: 2.2 });
+      }
+      fringe(F, bangsLine, dark, 0, true);
+    }
     else if (style === 'sidepart') fringe(F, sidePart, dark, partDir * 0.5);
-    else if (style === 'long' || style === 'bob') fringe(F, pick([middlePart, bangsLine, sidePart]), dark, chance(0.5) ? partDir * 0.4 : 0);
-    else if (style === 'ponytail' || style === 'braids') fringe(F, pick([middlePart, sidePart]), dark, partDir * 0.3);
-    else if (style === 'pigtails') fringe(F, pick([bangsLine, middlePart]), dark);
-    else if (style === 'bun') {
+    else if (style === 'long' || style === 'bob' || style === 'wavy') {
+      var lbLine = pick([middlePart, bangsLine, sidePart]);
+      fringe(F, lbLine, dark, chance(0.5) ? partDir * 0.4 : 0, lbLine === bangsLine);
+    }
+    else if (style === 'ponytail' || style === 'braids' || style === 'sidebraid') fringe(F, pick([middlePart, sidePart]), dark, partDir * 0.3);
+    else if (style === 'pigtails') {
+      var pgLine = pick([bangsLine, middlePart]);
+      fringe(F, pgLine, dark, 0, pgLine === bangsLine);
+    }
+    else if (style === 'bun' || style === 'halfup') {
       fringe(F, pick([middlePart, sidePart, flatLine]), dark);
       var bx = cx + rf(-0.35, 0.35) * rx, by = cy - ry * 1.08, br = rx * rf(0.26, 0.36);
       sketch(blobPts(bx, by, br, br * 0.85, 0.1, 12), { closed: true, fill: true, fillColor: dark ? hairFill : pen.base, wash: dark ? null : hairTint, wob: 1.5, width: 2 });
@@ -1615,7 +1669,7 @@
       shift = F.shift, skinWash = F.skinWash, style = F.style;
     var earY = cy + ry * rf(-0.05, 0.12);
     var earR = (isChild ? rf(6, 9) : rf(6, 11)) * F.earSize;   // earSize gene
-    var hideEars = ['long', 'bob', 'afro', 'headscarf'].indexOf(style) >= 0 && chance(0.85);
+    var hideEars = ['long', 'bob', 'afro', 'headscarf', 'wavy', 'halfup'].indexOf(style) >= 0 && chance(0.85);
     /* the ear on the side the face turns toward slips out of view */
     var leftEar = !hideEars && look >= -0.5 && (look < 0.5 || chance(0.8));
     var rightEar = !hideEars && look <= 0.5 && (look > -0.5 || chance(0.8));
@@ -1802,6 +1856,28 @@
       sketch([[mx - 9 * mS, mY], [mx - 4 * mS, mY - 3], [mx, mY - 1], [mx + 4 * mS, mY - 3], [mx + 9 * mS, mY], [mx, mY + 5]],
         { closed: true, fill: !lipRed, wash: lipRed ? { color: C().ACCENTS[0], alpha: 0.9, grow: 1.2, dx: rf(-2, 2), dy: rf(-1, 1) } : null, width: 1.6, wob: 0.7 });
       line(mx - 7 * mS, mY + 0.5, mx + 7 * mS, mY + 0.5, { width: 1, wob: 0.4, color: pen.base });
+    } else if (mouthKind === 'full') {
+      /* full painted lips: cupid's-bow upper lip over a heavier lower lip */
+      var lw = 11 * mS, fullRed = chance(soft > 0 ? 0.8 : 0.4);
+      var lipPts = [
+        [mx - lw, mY + 0.5],
+        [mx - lw * 0.5, mY - 3.2 * mS], [mx - lw * 0.22, mY - 3.9 * mS], [mx, mY - 1.8 * mS],
+        [mx + lw * 0.22, mY - 3.9 * mS], [mx + lw * 0.5, mY - 3.2 * mS],
+        [mx + lw, mY + 0.5],
+        [mx + lw * 0.5, mY + 5.6 * mS], [mx, mY + 6.4 * mS], [mx - lw * 0.5, mY + 5.6 * mS],
+      ];
+      sketch(lipPts, { closed: true,
+        wash: fullRed ? { color: C().ACCENTS[0], alpha: 0.85, grow: 1.05, dx: rf(-2, 2), dy: rf(-1, 1) } : null,
+        width: 1.8, wob: 0.7 });
+      line(mx - lw * 0.8, mY + 1, mx + lw * 0.8, mY + 1, { width: 1.4, wob: 0.5 });
+    } else if (mouthKind === 'heart') {
+      /* small pursed kiss-lips with a strong cupid's bow */
+      var hw = 6.5 * mS, heartRed = chance(0.75);
+      sketch([[mx - hw, mY + 1], [mx - hw * 0.45, mY - 3 * mS], [mx, mY - 1 * mS], [mx + hw * 0.45, mY - 3 * mS], [mx + hw, mY + 1], [mx, mY + 5 * mS]],
+        { closed: true, fill: !heartRed,
+          wash: heartRed ? { color: C().ACCENTS[0], alpha: 0.9, grow: 1.15, dx: rf(-1.5, 1.5), dy: rf(-1, 1) } : null,
+          width: 1.6, wob: 0.7 });
+      line(mx - hw * 0.7, mY + 0.5, mx + hw * 0.7, mY + 0.5, { width: 1, wob: 0.4, color: pen.base });
     } else if (mouthKind === 'smile') {
       arc(mx, mY - 2, rf(8, 14) * mS, 0.25, Math.PI - 0.25, { width: 2 });
     } else if (mouthKind === 'grin') {
@@ -1821,6 +1897,25 @@
     } else if (beard === 'goatee') {
       sketch(blobPts(mx, mY + rf(12, 16), rf(7, 11), rf(5, 9), 0.1, 10), { closed: true, fill: !grey, width: 1.5 });
       if (grey) hatch(mx - 6, mY + 8, mx + 6, mY + 20, 10, Math.PI / 2, 6);
+    } else if (beard === 'chinstrap') {
+      /* a narrow band of beard hugging the jaw line, cheeks and chin-front left bare */
+      clipHead(F, function () {
+        var outer = arcPts(cx, cy, rx * 1.03, ry * 1.03, Math.PI * 0.1, Math.PI * 0.9, 0.03, 14);
+        var inner = arcPts(cx, cy, rx * 0.84, ry * 0.87, Math.PI * 0.9, Math.PI * 0.1, 0.03, 14);
+        sketch(outer.concat(inner), { closed: true, fill: !grey, width: 1.8, wob: 1.2 });
+        if (grey) hatch(cx - rx * 0.8, cy + ry * 0.55, cx + rx * 0.8, cy + ry * 1.0, ri(28, 46), Math.PI / 2 + rf(-0.2, 0.2), 8);
+      });
+    } else if (beard === 'mutton') {
+      /* mutton chops: two cheek patches down from the ears, the chin left bare */
+      clipHead(F, function () {
+        [-1, 1].forEach(function (s) {
+          var px = cx + s * rx * 0.72 + shift * 0.4;
+          var patch = [[px - s * rx * 0.02, cy - ry * 0.05], [px + s * rx * 0.3, cy - ry * 0.02],
+            [px + s * rx * 0.32, cy + ry * 0.55], [px - s * rx * 0.05, cy + ry * 0.7], [px - s * rx * 0.18, cy + ry * 0.32]];
+          sketch(patch, { closed: true, fill: !grey, width: 1.8, wob: 1.4 });
+          if (grey) hatch(px - rx * 0.2, cy, px + rx * 0.2, cy + ry * 0.6, ri(14, 24), Math.PI / 2 + s * 0.2, 7);
+        });
+      });
     } else if (beard === 'full') {
       var top = mY - 6;
       clipHead(F, function () {
