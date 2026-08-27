@@ -128,6 +128,8 @@ var initialSettings = loadSettings(); // localStorage['draw.settings'] + ['draw.
    (see ai-models.js); persisting the result (if it actually healed something)
    happens once App/saveSettings/saveKeys exist, right below the App object. */
 var initialHeal = window.AI_MODEL_CATALOG.healKeys(initialSettings);
+/* healKeys only knows provider/models/keys – re-attach the fields it doesn't carry */
+initialHeal.settings.manualMode = initialSettings.manualMode;
 initialSettings = initialHeal.settings;
 /* Task 13 review fix: the load-time heal above used to happen silently – the
    provider select could flip to a different provider on page load with no
@@ -144,7 +146,7 @@ var App = {
     state: 'idle',        // idle | ready | running | done
     phase: null,           // null | drawing | judging | reviewing | paused
     provider: initialSettings.provider,   // 'gemini' | 'openai' | 'claude'
-    manualMode: false,     // true while the current run was started with Manual: AI judge off, the user picks every cell
+    manualMode: initialSettings.manualMode, // the Manual toggle: true = AI judge off, the user picks every cell (persisted)
     models: initialSettings.models,       // { gemini, openai, claude } model name text
     keys: initialSettings.keys,           // { gemini, openai, claude } API key text – never logged
     discovered: providerMap(function () { return []; }), // Task 9: extra model IDs discovered per provider (non-curated only), runtime-only
@@ -407,6 +409,7 @@ function loadSettings() {
   var models = {};
   PROVIDERS.forEach(function (p) { models[p] = defaultModelFor(p); });
   var keys = { gemini: '', openai: '', claude: '' };
+  var manualMode = false;
   var migrated = false;
   try {
     var rawSettings = window.localStorage.getItem('draw.settings');
@@ -421,6 +424,7 @@ function loadSettings() {
             }
           });
         }
+        manualMode = parsedSettings.manualMode === true;
       }
     }
     PROVIDERS.forEach(function (p) {
@@ -430,7 +434,7 @@ function loadSettings() {
       }
     });
     if (migrated) {
-      window.localStorage.setItem('draw.settings', JSON.stringify({ provider: provider, models: models }));
+      window.localStorage.setItem('draw.settings', JSON.stringify({ provider: provider, models: models, manualMode: manualMode }));
     }
     var rawKeys = window.localStorage.getItem('draw.keys');
     if (rawKeys) {
@@ -444,7 +448,7 @@ function loadSettings() {
   } catch (e) {
     // corrupt JSON or localStorage unavailable – fall back to the defaults above
   }
-  return { provider: provider, models: models, keys: keys };
+  return { provider: provider, models: models, keys: keys, manualMode: manualMode };
 }
 
 function saveSettings() {
@@ -452,6 +456,7 @@ function saveSettings() {
     window.localStorage.setItem('draw.settings', JSON.stringify({
       provider: App.state.provider,
       models: App.state.models,
+      manualMode: App.state.manualMode,
     }));
   } catch (e) {
     // storage full/unavailable – settings just won't persist across reload
@@ -1283,17 +1288,18 @@ function renderHeaderControls(s) {
     stopBtn.disabled = s.state !== 'running';
     stopBtn.addEventListener('click', onStopClick);
 
-    /* Manual: a second start button – same gate as Start, but the run it starts has
-       the AI judge off and the user picks every cell. Highlighted (not clickable)
-       while a manual run is under way, so the mode stays visible. */
-    var manualActive = s.manualMode && s.state !== 'ready';
+    /* Manual: an on/off toggle for the mode, clearly pressed (teal) while it is on.
+       Off = Start runs the AI-judged flow, on = Start runs a manual run where the
+       user picks every cell (no API key needed). Usable at any moment. */
     var manualBtn = el('button', {
-      class: 'edu-btn ghost manual-toggle' + (manualActive ? ' is-on' : ''), type: 'button', text: 'Manual',
-      'aria-label': 'Start a manual run - AI judge off, you pick every sketch',
-      title: 'Start a run without the AI judge and pick every sketch yourself. No API key needed.',
+      class: 'edu-btn ghost manual-toggle' + (s.manualMode ? ' is-on' : ''), type: 'button', text: 'Manual',
+      'aria-pressed': s.manualMode ? 'true' : 'false',
+      'aria-label': s.manualMode ? 'Manual mode is on - Start runs without the AI judge; click to switch it off'
+        : 'Manual mode is off - click so Start runs without the AI judge and you pick every sketch',
+      title: s.manualMode ? 'Manual mode: you pick every sketch, no API key needed. Click to use the AI judge again.'
+        : 'Switch off the AI judge: you pick every sketch yourself, no API key needed.',
     });
-    manualBtn.disabled = s.state !== 'ready';
-    manualBtn.addEventListener('click', onManualStartClick);
+    manualBtn.addEventListener('click', onManualToggle);
 
     wrap.appendChild(startBtn);
     wrap.appendChild(manualBtn);
@@ -1320,7 +1326,7 @@ function renderHeaderPhotoActions(s) {
 
   var restartBtn = el('button', {
     class: 'edu-btn ghost', type: 'button', text: 'Restart',
-    'aria-label': 'Restart drawing from step 1, keeping the current photo',
+    'aria-label': 'Drop this run but keep the photo - back to ready, where Start runs AI or manual mode',
   });
   restartBtn.disabled = s.state !== 'running' && s.state !== 'done';
   restartBtn.addEventListener('click', onStartOverClick);
@@ -1443,10 +1449,11 @@ function renderSettingsPanel(s) {
   });
   panel.appendChild(el('h2', { text: 'Settings' }));
 
-  if (s.manualMode && s.state === 'running') {
+  if (s.manualMode) {
     panel.appendChild(el('p', {
       class: 'settings-note settings-manual-note',
-      text: 'This is a manual run - the AI judge is off, and the provider, model and API key below are not used.',
+      text: 'Manual mode is on - the AI judge is off, and you pick every sketch yourself. ' +
+        'The provider, model and API key below are not used while it stays on.',
     }));
   }
 
@@ -1605,8 +1612,10 @@ function renderCenterColumn(s) {
        uploaded to "upload a photo" made the next step (Start/Manual) easy to miss */
     grid.appendChild(el('p', {
       text: s.state === 'ready'
-        ? 'Photo loaded - press Start for an AI-judged run, or Manual to pick every sketch yourself.'
-        : 'Upload a photo, then press Start or Manual to draw the first candidates.',
+        ? (s.manualMode
+          ? 'Photo loaded - Manual is on: press Start and pick every sketch yourself.'
+          : 'Photo loaded - press Start for an AI-judged run, or switch Manual on to pick yourself.')
+        : 'Upload a photo, then press Start to draw the first candidates.',
     }));
   }
   gridPanel.appendChild(grid);
@@ -1789,11 +1798,39 @@ function handlePhotoFile(file) {
    press with that exact same (provider, key) pair already warned about, in which
    case it proceeds: patterns are heuristics, not proof, and the user gets the
    final say once they've seen the warning. */
-function onStartClick() { startRun(false); }
+/* Start runs in whichever mode the Manual toggle shows: AI-judged when it is off,
+   manual (the user picks every cell, no key needed) when it is on. */
+function onStartClick() { startRun(App.state.manualMode); }
 
-/* the Manual button: starts a run exactly like Start, but with the AI judge off – the
-   user picks every cell themselves. No provider, model or key is needed or checked. */
-function onManualStartClick() { startRun(true); }
+/* onManualToggle() – the Manual button: a clear on/off switch for the mode (pressed =
+   AI judge off). Flipping it never starts or stops a run – Start does that – but it is
+   safe to flip mid-run:
+   - AI -> Manual while judging: the in-flight request is orphaned (epoch bump) and the
+     panel is handed to the user for a pick, exactly like beginJudging's manual branch;
+   - AI -> Manual while paused: parked judge outcomes are dropped, the pause is kept,
+     and Resume lands in reviewing where the user picks;
+   - Manual -> AI on a panel still waiting for a pick: the judge is asked now. Any other
+     moment just flips the flag – the next step's beginJudging reads it fresh. */
+function onManualToggle() {
+  var s = App.state;
+  var manual = !s.manualMode;
+  App.set({ manualMode: manual });
+  saveSettings();
+  if (s.state !== 'running') return;
+  if (manual) {
+    if (s.phase === 'judging') {
+      judgeEpoch++;
+      clearJudgeRetryTimer();
+      App.set({ phase: 'reviewing', runError: null, pendingJudge: null, pausedFrom: null });
+    } else if (s.phase === 'paused') {
+      judgeEpoch++;
+      clearJudgeRetryTimer();
+      App.set({ runError: null, pendingJudge: null, pausedFrom: null });
+    }
+  } else if (s.phase === 'reviewing' && !s.winner) {
+    beginJudging();
+  }
+}
 
 function startRun(manual) {
   if (App.state.state !== 'ready') return;
@@ -1847,7 +1884,7 @@ function startRun(manual) {
   if (!manual && !hasKey(provider)) {
     App.set({
       settingsHighlight: true,
-      settingsError: 'Add an API key for ' + PROVIDER_LABELS[provider] + ' to start a run, or press Manual to pick every sketch yourself.',
+      settingsError: 'Add an API key for ' + PROVIDER_LABELS[provider] + ' to start a run, or switch Manual on to pick every sketch yourself.',
     });
     return;
   }
@@ -2042,10 +2079,10 @@ function onCellPick(index) {
 }
 
 function onStartOverClick() {
-  // same photo, fresh step 1: reuse the photo already in state, drop everything else,
-  // then run the exact Start path so step 1 starts from NEUTRAL_BASE with a new wobbleSeed.
-  // A manual run restarts as a manual run, an AI run as an AI run.
-  var manual = App.state.manualMode;
+  // same photo, back to the choice point: drop the run but keep the photo, landing in
+  // 'ready' where Start (and the Manual toggle) are live again. Deliberately does NOT
+  // auto-start – restarting is exactly when the user may want to switch between the
+  // AI-judged and manual modes before pressing Start.
   clearReviewTimer();
   clearJudgeRetryTimer();
   judgeEpoch++; // invalidate any judge Promise still in flight
@@ -2056,7 +2093,6 @@ function onStartOverClick() {
     pausedFrom: null, pendingJudge: null,
     doneGenome: null, portraitDataUrl: null, portraitTransparentDataUrl: null, compositeDataUrl: null,
   });
-  startRun(manual);
 }
 
 function onNewPhotoClick() {
