@@ -314,6 +314,12 @@ body.edu { background: var(--paper); color: var(--ink); font-family: var(--font-
 .cell.is-wild { border-style: dashed; }
 .cell.is-wild:hover { border-color: var(--teal); }
 
+/* locked panel: once a winner stands, the other cells stop looking clickable until
+   the next step's panel appears (picking is ignored in onCellPick anyway) */
+.cell.is-locked { cursor: default; opacity: 0.55; }
+.cell.is-locked:hover { border-color: var(--line); }
+.cell.is-wild.is-locked:hover { border-color: var(--line); }
+
 /* winner highlight (Task 7): an opacity fade, not a shape/position change – a new
    .is-winner cell is a freshly-rendered DOM node each time (render() rebuilds the
    whole grid), so this animation naturally replays on every new pick or override. */

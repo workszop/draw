@@ -1621,16 +1621,20 @@ function renderCell(s, i) {
   var hash = window.Genome.genomeHash(genome);
   var isWinner = s.winner === index;
   var isWild = isWildCell(s, index);
+  /* once a winner stands, the panel is locked (see onCellPick): the other cells stop
+     being buttons – no hover affordance, no tab stop – until the next panel renders */
+  var isLocked = !!s.winner && !isWinner;
   var label = 'Candidate ' + index + (isWild ? ', wild card' : '') +
     (isWinner ? ', selected' + (s.winnerSource === 'ai' ? ' by AI' : ' by you') : '');
   var cell = el('div', {
-    class: 'cell' + (isWinner ? ' is-winner' : '') + (isWild ? ' is-wild' : ''),
+    class: 'cell' + (isWinner ? ' is-winner' : '') + (isWild ? ' is-wild' : '') + (isLocked ? ' is-locked' : ''),
     'data-index': String(index),
     'data-genome-hash': hash,
     'data-wild': isWild ? 'true' : 'false',
-    tabindex: '0',
+    tabindex: isLocked ? '-1' : '0',
     role: 'button',
     'aria-label': label,
+    'aria-disabled': isLocked ? 'true' : 'false',
   });
   var canvas = document.createElement('canvas');
   canvas.width = CELL_W; canvas.height = CELL_H;
@@ -2017,15 +2021,19 @@ function triggerPortraitDownload() {
 
 function onCellPick(index) {
   var s = App.state;
-  // pickable while actively reviewing an AI/manual pick, and while paused (spec §6:
-  // a judge failure pauses the run and waits for exactly this manual pick + Resume)
+  // pickable while a panel is waiting for its selection: phase 'reviewing' with no
+  // winner (a manual run, or after a judge failure's manual-continue), and 'paused'
+  // (spec §6: a judge failure pauses the run and waits for exactly this pick + Resume)
   if (s.state !== 'running' || (s.phase !== 'reviewing' && s.phase !== 'paused')) return;
   if (!s.population || index < 1 || index > s.population.length) return;
-  // overriding a pick keeps whatever hints the AI already produced this generation –
-  // only the winner + its source change, winnerHints is left untouched. A pick made
-  // while paused (spec §6 manual-continue) also clears the judge-failure message,
-  // since the user has now done exactly what it asked for.
-  if (s.phase === 'reviewing') startReviewTimer(); // (re)start the full REVIEW_MS window on every pick, including overrides
+  /* one selection per panel: once a winner stands (AI or manual), every further pick is
+     ignored until the next step's panel appears – no overrides, no countdown restarts.
+     This guard covers clicks, the per-cell Enter/Space and the global 1-9/0/-/= keys,
+     which all route through here. */
+  if (s.winner) return;
+  if (s.phase === 'reviewing') startReviewTimer();
+  // a pick made while paused (spec §6 manual-continue) also clears the judge-failure
+  // message, since the user has now done exactly what it asked for
   App.set({
     winner: index,
     winnerSource: 'manual',
