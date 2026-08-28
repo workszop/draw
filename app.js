@@ -30,9 +30,10 @@ var COMPOSITE_GAP = 24;                  // px gap between photo and portrait in
 var ELEMENT_STEPS = window.Genome.ELEMENT_STEPS;
 var STEP_COUNT = ELEMENT_STEPS.length;
 /* PANEL_SIZE (12) = 1 keep-as-is anchor + 8 element variants + 3 wild cards, laid out
-   4 across x 3 down. Read off genome.js so the grid, the composite sent to the judge,
-   the prompt's "1-12", the sanitizer's range and the keyboard shortcuts can never
-   disagree about how many cells there are. */
+   4 across x 3 down – except the persona step, whose 12 cells enumerate every
+   age x gender combo with no wilds (genome.js fullPanel). Read off genome.js so the
+   grid, the composite sent to the judge, the prompt's "1-12", the sanitizer's range
+   and the keyboard shortcuts can never disagree about how many cells there are. */
 var PANEL_SIZE = window.Genome.PANEL_SIZE;
 var GRID_COLS = 4, GRID_ROWS = 3;
 
@@ -837,7 +838,10 @@ function mergeStepGenes(working, stepNumber, pickedGenome, isWild) {
   }
 
   var step = stepAt(stepNumber);
-  var carried = (step ? step.genes : []).concat(window.Genome.STYLE_GENES).concat(['wobbleSeed']);
+  /* step.carries: extra genes the pick brings along beyond the step's own – the
+     persona step's typical hair (see genome.js fullPanel). Without them the chosen
+     face would snap back to the base's hair the moment it was picked. */
+  var carried = (step ? step.genes.concat(step.carries || []) : []).concat(window.Genome.STYLE_GENES).concat(['wobbleSeed']);
   var merged = {};
   for (var k in working) {
     if (Object.prototype.hasOwnProperty.call(working, k)) merged[k] = working[k];

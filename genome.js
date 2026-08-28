@@ -942,12 +942,16 @@
      texture) and in STYLE_GENES (the pen/ink/wash the sketch is drawn with) – never
      in another element's identity genes. */
   var ELEMENT_STEPS = [
-    /* must: combinations that have to be on the panel no matter how the mixed-radix
-       walk falls. 4 ages x 3 genders is 12 combos for 8 slots, so young-fem and
-       young-masc – the ones users most often want and the ones the old renderer made
-       look middle-aged – used to be droppable at random. They are not any more. */
+    /* full: this step's panel ENUMERATES every combination of its gene domains exactly
+       once instead of sampling – 4 ages x 3 genders = 12 combos = PANEL_SIZE, so every
+       gender at every age is always on the table (women included, which the old
+       8-slot sampling could not guarantee). carries: extra genes the pick brings
+       along – fullPanel dresses each persona in hair typical for it (the strongest
+       visual cue for age and gender), and mergeStepGenes copies these too so the
+       chosen face keeps the look it was picked for. Provisional only: the hair step
+       revisits them with the full domain. */
     { id: 'persona',     label: 'age and gender',              genes: ['age', 'gender'],
-      must: [{ age: 'young', gender: 'fem' }, { age: 'young', gender: 'masc' }] },
+      full: true, carries: ['hairStyle', 'hairDark'] },
     { id: 'face',        label: 'face shape and skin tone',    genes: ['faceShape', 'headW', 'headRatio', 'skinIdx'] },
     { id: 'hair',        label: 'hair',                        genes: ['hairStyle', 'hairDark', 'hairFillIdx', 'hairTintIdx'] },
     { id: 'eyes',        label: 'eyes and eyebrows',           genes: ['eyeKind', 'eyeSize', 'eyeGap', 'browKind', 'look'] },
@@ -1079,6 +1083,10 @@
      reason nextPopulation does – provenance the caller needs (which cells are wild
      cards, for the badge) travels with the data instead of in shared state.
 
+     A stepDef.full step (the persona step) short-circuits to fullPanel(): a complete
+     enumeration of the step's combos with no wild cards – see there. Everything below
+     describes the sampled panel every other step gets.
+
      - cell 1 is repair(base) itself – the exact face already on screen, the
        "keep as is" anchor, with the base's own wobbleSeed and style genes intact.
        It stays at cell 1 always; the other 11 are shuffled;
@@ -1106,6 +1114,7 @@
     rand = rand || Math.random;
     var stepDef = resolveStep(step);
     var baseG = repair(base);                 // repair() already copies, so `base` is untouched
+    if (stepDef.full) return fullPanel(baseG, stepDef, rand);
     var genes = stepDef.genes;
     var lists = [];
     var i, j, t;
@@ -1156,8 +1165,6 @@
       seen[genomeHash(chosen)] = true;
       out.push(chosen);
     }
-
-    applyMustCombos(out, baseG, stepDef);
 
     /* wild cards, then a shuffle of everything except the anchor: the "keep as is"
        face stays cell 1 where the user can always find it, while the variants and the
@@ -1231,52 +1238,111 @@
     return repair(g);
   }
 
-  /* applyMustCombos(variants, baseG, stepDef) – guarantees every combination listed in
-     stepDef.must appears somewhere on the panel, overwriting one alternative slot per
-     missing combo (never candidate 1, the "keep as is" anchor, and never a slot already
-     claimed by another must). The replacement is built from the BASE genome with the
-     must's genes stamped on, carrying over only the overwritten slot's style genes and
-     wobbleSeed – so it still looks like part of the same sketch panel while keeping the
-     same "outside the step, only style/seed/repair-consequences may differ" contract
-     the rest of the panel obeys. (Inheriting the old occupant's genes instead would
-     drag ITS repair consequences – a masc slot's suppressed earrings, say – onto a fem
-     combo that never asked for them.) Slots are claimed from the back, so the
-     mixed-radix spread at the front of the panel survives intact. Mutates the array it
-     is handed, which is the freshly built local `out` – never a caller's object. */
-  function applyMustCombos(variants, baseG, stepDef) {
-    var must = stepDef.must;
-    if (!Array.isArray(must) || !must.length) return;
-    var claimed = {};
-    for (var m = 0; m < must.length; m++) {
-      var combo = must[m];
-      var present = false, i;
-      for (i = 0; i < variants.length; i++) {
-        if (matchesCombo(variants[i], combo)) { present = true; break; }
-      }
-      if (present) continue;
-      var slot = -1;
-      for (i = variants.length - 1; i >= 1; i--) {
-        if (!claimed[i]) { slot = i; break; }
-      }
-      if (slot < 0) return;                       // more musts than slots – leave the panel alone
-      claimed[slot] = true;
-      var cand = {};
-      for (var k = 0; k < GENE_NAMES.length; k++) cand[GENE_NAMES[k]] = baseG[GENE_NAMES[k]];
-      for (i = 0; i < STYLE_GENES.length; i++) cand[STYLE_GENES[i]] = variants[slot][STYLE_GENES[i]];
-      cand.wobbleSeed = variants[slot].wobbleSeed;
-      for (var gene in combo) {
-        if (Object.prototype.hasOwnProperty.call(combo, gene)) cand[gene] = combo[gene];
-      }
-      variants[slot] = repair(cand);
-    }
+  /* typicalHair(g, rand) – dresses a candidate in hair TYPICAL for its persona: a
+     style drawn from hairTable weighted by its age and gender, and a darkness roll
+     matching randomGenome's (old faces mostly light). Hair is the strongest visual
+     cue for both age and gender, so without this a fem cell on the persona panel
+     wears the neutral base's sidepart and simply does not read as a woman.
+
+     The soft/rough weights are amplified beyond randomGenome's natural mix: this
+     panel's one job is letting the user READ the age/gender axis, so gender-coded
+     styles are deliberately over-represented (at 1.0 nearly half the fem cells drew
+     unisex styles and the axis blurred). The hair step later re-balances – its panel
+     samples the full domain. */
+  var TYPICAL_HAIR_EMPHASIS = 2;
+  function typicalHair(g, rand) {
+    var soft = softOf(g.gender) * TYPICAL_HAIR_EMPHASIS;
+    var rough = roughOf(g.gender) * TYPICAL_HAIR_EMPHASIS;
+    g.hairStyle = wpickR(rand, hairTable(g.age, soft, rough));
+    g.hairDark = chanceR(rand, g.age === 'old' ? 0.2 : 0.55);
   }
 
-  function matchesCombo(genome, combo) {
-    for (var gene in combo) {
-      if (!Object.prototype.hasOwnProperty.call(combo, gene)) continue;
-      if (genome[gene] !== combo[gene]) return false;
+  /* femCodedTable(age) – the soft-only slice of hairTable for this age: the styles
+     whose weight exists purely because of the soft term (long, bob, braids …), i.e.
+     the ones that read female at a glance. Used by fullPanel's guarantee below. */
+  var FEM_CODED_TABLES = {};
+  function femCodedTable(age) {
+    if (!FEM_CODED_TABLES[age]) {
+      var softT = hairTable(age, 1, 0), neutralT = hairTable(age, 0, 0), t = {};
+      for (var k in softT) { if (!(k in neutralT)) t[k] = softT[k]; }
+      FEM_CODED_TABLES[age] = t;
     }
-    return true;
+    return FEM_CODED_TABLES[age];
+  }
+
+  /* fullPanel(baseG, stepDef, rand) – the panel for a stepDef.full step (today: the
+     persona step): PANEL_SIZE cells ENUMERATING every combination of the step's gene
+     domains exactly once – 4 ages x 3 genders = 12 – so the widest possible selection
+     is on the table from the first sketch, women at every age guaranteed. Cell 1 stays
+     the anchor (the base's own combo, untouched); the other 11 are the remaining
+     combos, shuffled. No wild cards: nothing is locked in yet for a wild jump to
+     escape, and the enumeration needs every slot.
+
+     When the step carries hair (stepDef.carries), each non-anchor cell is dressed by
+     typicalHair() for its persona; the rolled genes travel with the pick via
+     mergeStepGenes, so the face chosen keeps the look it was chosen for. Like every
+     other candidate: fresh wobbleSeed, style genes re-rolled at STYLE_P, repaired. */
+  function fullPanel(baseG, stepDef, rand) {
+    var combos = [{}];
+    var genes = stepDef.genes;
+    var gi, c, i;
+    for (gi = 0; gi < genes.length; gi++) {
+      var domain = geneDomain(genes[gi], baseG).values;
+      var next = [];
+      for (c = 0; c < combos.length; c++) {
+        for (var v = 0; v < domain.length; v++) {
+          var grown = {};
+          for (var k in combos[c]) grown[k] = combos[c][k];
+          grown[genes[gi]] = domain[v];
+          next.push(grown);
+        }
+      }
+      combos = next;
+    }
+
+    var dressHair = !!(stepDef.carries && inList('hairStyle', stepDef.carries));
+    var out = [baseG], meta = ['anchor'];
+    for (c = 0; c < combos.length && out.length < PANEL_SIZE; c++) {
+      var isBaseCombo = true;
+      for (gi = 0; gi < genes.length; gi++) {
+        if (combos[c][genes[gi]] !== baseG[genes[gi]]) isBaseCombo = false;
+      }
+      if (isBaseCombo) continue;                  // the anchor already shows this combo
+      var cand = {};
+      for (i = 0; i < GENE_NAMES.length; i++) cand[GENE_NAMES[i]] = baseG[GENE_NAMES[i]];
+      for (gi = 0; gi < genes.length; gi++) cand[genes[gi]] = combos[c][genes[gi]];
+      if (dressHair) typicalHair(cand, rand);
+      cand.wobbleSeed = (rand() * 4294967296) | 0;
+      for (i = 0; i < STYLE_GENES.length; i++) {
+        if (chanceR(rand, STYLE_P)) rollStyleGene(cand, STYLE_GENES[i], rand);
+      }
+      out.push(repair(cand));
+      meta.push('variant');
+    }
+
+    /* the guarantee behind "women are always in the first selection": typicalHair
+       keeps unisex styles in the mix (real women wear buzz cuts), so it is possible –
+       rarely – for every fem cell to draw one and the gender axis to blur. If that
+       happens, re-dress the first fem cell from the fem-coded subset so at least one
+       woman on the panel is unmistakable at a glance. */
+    if (dressHair) {
+      var firstFem = -1, anyCoded = false;
+      for (i = 1; i < out.length; i++) {
+        if (out[i].gender !== 'fem') continue;
+        if (firstFem < 0) firstFem = i;
+        if (out[i].hairStyle in femCodedTable(out[i].age)) { anyCoded = true; break; }
+      }
+      if (!anyCoded && firstFem >= 0) {
+        var redressed = {};
+        for (i = 0; i < GENE_NAMES.length; i++) redressed[GENE_NAMES[i]] = out[firstFem][GENE_NAMES[i]];
+        redressed.hairStyle = wpickR(rand, femCodedTable(redressed.age));
+        out[firstFem] = repair(redressed);
+      }
+    }
+
+    var tailPop = out.slice(1), tailMeta = meta.slice(1);
+    shuffleParallelR(rand, tailPop, tailMeta);
+    return { population: [out[0]].concat(tailPop), meta: ['anchor'].concat(tailMeta) };
   }
 
   // ─── Render: the marker box, resolved lazily so genome.js loads without a DOM ───

@@ -300,18 +300,21 @@
   /* probe 6 (elements branch): Genome.elementVariants() – the identikit contract, over
      all 8 ELEMENT_STEPS on 20 random bases each:
        - exactly PANEL_SIZE (12) candidates with an aligned meta array holding exactly
-         one 'anchor', 8 'variant' and 3 'wild'; all of them repair no-ops;
+         one 'anchor', 8 'variant' and 3 'wild' – except a stepDef.full step (the
+         persona step), which holds 1 'anchor' + 11 'variant' and no wilds, and whose
+         cells cover EVERY combination of the step's gene domains exactly once (all
+         12 age x gender combos, so every gender at every age is always offered);
        - cell 1 is the anchor and deep-equals the base (the always-available "keep as
          is"), the base's own wobbleSeed and style genes included;
-       - outside the step's genes, a VARIANT may differ from the base ONLY in
-         wobbleSeed and Genome.STYLE_GENES (the fresh hand and the swapped pen that
-         make the panel fun) – never in another element's identity genes, and never
-         in skinIdx / hairFillIdx / hairTintIdx, which belong to their own steps;
+       - outside the step's genes (plus its carries – the persona step's typical
+         hair), a VARIANT may differ from the base ONLY in wobbleSeed and
+         Genome.STYLE_GENES (the fresh hand and the swapped pen that make the panel
+         fun) – never in another element's identity genes;
        - any remaining variant difference must be one repair() itself forces (a child
          face losing its beard, an age change pulling headW back into range). That is
-         checked exactly, not waved through: re-merging the candidate's step genes,
-         style genes and wobbleSeed onto the base and repairing must reproduce the
-         candidate gene for gene;
+         checked exactly, not waved through: re-merging the candidate's step + carried
+         genes, style genes and wobbleSeed onto the base and repairing must reproduce
+         the candidate gene for gene;
        - a WILD card is allowed to differ only in this step's genes and the genes of
          steps LATER in the walk: every gene owned by an EARLIER step (the persona
          included – age and gender are step 1) must equal the base's. An element the
@@ -339,9 +342,10 @@
       var base = Genome.randomGenome(rand);
       for (var si = 0; si < steps.length; si++) {
         var step = steps[si];
-        /* carried = every gene a candidate is allowed to move: the step's own, plus
-           the decoration (style genes + wobbleSeed) shared by all steps */
-        var carried = step.genes.concat(styleGenes).concat(['wobbleSeed']);
+        /* carried = every gene a candidate is allowed to move: the step's own plus its
+           carries (the persona step's typical hair), plus the decoration (style genes
+           + wobbleSeed) shared by all steps */
+        var carried = step.genes.concat(step.carries || []).concat(styleGenes).concat(['wobbleSeed']);
         var allowed = {};
         carried.forEach(function (n) { allowed[n] = true; });
         var beforeHash = hash(base);
@@ -361,7 +365,23 @@
         }
         var counts = { anchor: 0, variant: 0, wild: 0 };
         meta.forEach(function (m) { if (counts[m] !== undefined) counts[m]++; });
-        if (counts.anchor !== 1 || counts.variant !== 8 || counts.wild !== 3) {
+        if (step.full) {
+          if (counts.anchor !== 1 || counts.variant !== panelSize - 1 || counts.wild !== 0) {
+            fails.push(where + 'meta split was ' + counts.anchor + '/' + counts.variant + '/' + counts.wild +
+              ', expected 1 anchor / ' + (panelSize - 1) + ' variant / 0 wild on a full step');
+          }
+          /* full enumeration: every combination of the step's genes exactly once */
+          var comboSeen = {};
+          variants.forEach(function (v) {
+            comboSeen[step.genes.map(function (n) { return v[n]; }).join('|')] = (comboSeen[step.genes.map(function (n) { return v[n]; }).join('|')] || 0) + 1;
+          });
+          var comboKeys = Object.keys(comboSeen);
+          var dupes = comboKeys.filter(function (k) { return comboSeen[k] > 1; });
+          if (comboKeys.length !== panelSize || dupes.length) {
+            fails.push(where + 'full step covered ' + comboKeys.length + '/' + panelSize +
+              ' combos' + (dupes.length ? ' with duplicates: ' + dupes.join(', ') : ''));
+          }
+        } else if (counts.anchor !== 1 || counts.variant !== 8 || counts.wild !== 3) {
           fails.push(where + 'meta split was ' + counts.anchor + '/' + counts.variant + '/' + counts.wild +
             ', expected 1 anchor / 8 variant / 3 wild');
         }
@@ -406,8 +426,9 @@
       pass: fails.length === 0,
       detail: fails.length === 0
         ? candidates + ' candidates over ' + steps.length + ' steps x ' + runs +
-          ' bases: ' + panelSize + ' per step (1 anchor / 8 variants / 3 wild), cell 1 = base, ' +
-          'variant non-step diffs limited to style/wobbleSeed + repair consequences, wilds never touch earlier-step genes'
+          ' bases: ' + panelSize + ' per step (persona enumerates all 12 combos, others 1 anchor / 8 variants / 3 wild), ' +
+          'cell 1 = base, variant non-step diffs limited to carries/style/wobbleSeed + repair consequences, ' +
+          'wilds never touch earlier-step genes'
         : fails.slice(0, 5).join(' | ') + (fails.length > 5 ? ' …(+' + (fails.length - 5) + ' more)' : ''),
     };
   }
@@ -419,7 +440,7 @@
     { name: 'stratification: 50 initialPopulation() calls satisfy §3.5', fn: stratification },
     { name: 'diversity: 9 members, no winner copy, 6/3 split, >=5/6 mutants differ across 3 generations', fn: diversity },
     { name: 'sanitizer: 10 fixture replies parse to expected results', fn: sanitizerFixtures },
-    { name: 'element variants: 12 per step (anchor + 8 variants + 3 wild cards), cell 1 = base, variants move only their element plus pen/ink style', fn: elementVariantContract },
+    { name: 'element variants: 12 per step (persona = all age x gender combos; others anchor + 8 variants + 3 wild cards), cell 1 = base, variants move only their element plus pen/ink style', fn: elementVariantContract },
   ];
 
   var Probes = {
