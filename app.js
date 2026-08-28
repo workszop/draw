@@ -817,12 +817,24 @@ function isStepSkipped(stepNumber, genome) {
    merge reproduces that candidate exactly – it is a merge, not an approximation.
    Never mutates its inputs. */
 function mergeStepGenes(working, stepNumber, pickedGenome, isWild) {
-  /* A WILD CARD merges whole: it is a deliberate jump to a different face – hair, nose,
-     eyes and all, minus the locked persona – and copying only this step's genes off it
-     would throw away exactly the jump the user picked it for. Everything it changed is
-     already legal for this face (genome.js's wildCard rolls inside each gene's domain
-     and holds the persona fixed), so the whole genome is the merge. */
-  if (isWild) return window.Genome.repair(pickedGenome);
+  /* A WILD CARD merges whole: it is a deliberate jump toward the choices still ahead –
+     this step's genes plus a re-roll of steps not yet reached – and copying only this
+     step's genes off it would throw away exactly the jump the user picked it for.
+     genome.js's wildCard already holds every EARLIER step's gene at the working value;
+     re-asserting them here is the belt to that suspender, so even a wild pick can never
+     undo an element already locked in. */
+  if (isWild) {
+    var wholeMerge = {};
+    for (var wk in pickedGenome) {
+      if (Object.prototype.hasOwnProperty.call(pickedGenome, wk)) wholeMerge[wk] = pickedGenome[wk];
+    }
+    for (var si = 1; si < stepNumber; si++) {
+      var locked = stepAt(si);
+      if (!locked || !working) break;
+      for (var gi = 0; gi < locked.genes.length; gi++) wholeMerge[locked.genes[gi]] = working[locked.genes[gi]];
+    }
+    return window.Genome.repair(wholeMerge);
+  }
 
   var step = stepAt(stepNumber);
   var carried = (step ? step.genes : []).concat(window.Genome.STYLE_GENES).concat(['wobbleSeed']);

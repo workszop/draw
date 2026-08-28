@@ -1175,26 +1175,42 @@
     return { population: [out[0]].concat(tailPop), meta: ['anchor'].concat(tailMeta) };
   }
 
-  /* wildCard(baseG, stepDef, rand) -> one deliberately bold candidate, the escape hatch
-     from a local minimum. Sequential element picking can walk itself into a corner: once
-     a wrong-ish hair or face shape is locked in, every later panel is a small variation
-     on that wrong face and there is no way back. A wild card re-rolls this step's genes
-     AND roughly WILD_REROLL_P of every other non-persona gene, so it lands somewhere
-     genuinely different while still being a face built from the same working genome.
-
-     Two things keep it "on topic" rather than pure noise: the persona (age + gender) is
-     held fixed unless this IS the persona step, and every roll goes through
-     mutateOneGene, so it stays inside each gene's legal domain for this face. Like every
-     other alternative it gets a fresh wobbleSeed and freshly rolled style genes.
-
-     Picking a wild card merges ALL of its genes into the working genome, not just the
-     step's – that is the whole point of the jump, and app.js's mergeStepGenes documents
-     the same thing from the other side. */
-  function wildCard(baseG, stepDef, rand) {
-    var isPersonaStep = false;
-    for (var p = 0; p < PERSONA_GENES.length; p++) {
-      if (stepDef.genes.indexOf(PERSONA_GENES[p]) >= 0) isPersonaStep = true;
+  /* geneStepIndex(name) -> the ELEMENT_STEPS index of the step that owns this gene, or
+     -1 for a gene no step offers (tilt, hatWashIdx). Built once; wildCard uses it to
+     tell an already-locked gene from one still ahead of the run. */
+  var GENE_STEP_INDEX = null;
+  function geneStepIndex(name) {
+    if (!GENE_STEP_INDEX) {
+      GENE_STEP_INDEX = {};
+      for (var s = 0; s < ELEMENT_STEPS.length; s++) {
+        for (var gi = 0; gi < ELEMENT_STEPS[s].genes.length; gi++) {
+          GENE_STEP_INDEX[ELEMENT_STEPS[s].genes[gi]] = s;
+        }
+      }
     }
+    return GENE_STEP_INDEX[name] === undefined ? -1 : GENE_STEP_INDEX[name];
+  }
+
+  /* wildCard(baseG, stepDef, rand) -> one deliberately bold candidate, the escape hatch
+     from a local minimum. Sequential element picking can walk itself into a corner: a
+     wrong-ish pick narrows every later panel, and the wild card is the bigger jump out.
+     It re-rolls this step's genes AND roughly WILD_REROLL_P of the genes belonging to
+     steps the run has NOT reached yet, so it lands somewhere genuinely different while
+     still being a face built from the same working genome.
+
+     What it may NEVER touch is a decision already made: every gene owned by an EARLIER
+     step – the persona included, since age and gender are step 1 – is held exactly at
+     the base's value, as are the genes no step offers (tilt, hatWashIdx). An element
+     the user (or the judge) locked in stays locked; the escape hatch only opens toward
+     choices still ahead. Every roll goes through mutateOneGene, so it stays inside each
+     gene's legal domain for this face, and like every other alternative it gets a fresh
+     wobbleSeed and freshly rolled style genes.
+
+     Picking a wild card still merges whole (app.js's mergeStepGenes documents the same
+     thing from the other side) – safe precisely because everything outside this step
+     and the steps ahead equals the working genome already. */
+  function wildCard(baseG, stepDef, rand) {
+    var stepIndex = ELEMENT_STEPS.indexOf(resolveStep(stepDef));
     var g = {};
     for (var i = 0; i < GENE_NAMES.length; i++) g[GENE_NAMES[i]] = baseG[GENE_NAMES[i]];
 
@@ -1202,9 +1218,11 @@
       var name = GENE_NAMES[i];
       if (name === 'wobbleSeed') continue;                       // rolled outright below
       if (inList(name, STYLE_GENES)) continue;                   // rolled outright below
-      if (!isPersonaStep && inList(name, PERSONA_GENES)) continue; // locked persona
-      var isStepGene = stepDef.genes.indexOf(name) >= 0;
-      if (!isStepGene && !chanceR(rand, WILD_REROLL_P)) continue;
+      var owner = geneStepIndex(name);
+      if (owner !== stepIndex) {
+        if (owner < 0 || owner < stepIndex) continue;            // locked or unowned: held fixed
+        if (!chanceR(rand, WILD_REROLL_P)) continue;             // a step still ahead: maybe jump
+      }
       mutateOneGene(g, name, null, rand);
     }
 

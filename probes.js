@@ -312,9 +312,11 @@
          checked exactly, not waved through: re-merging the candidate's step genes,
          style genes and wobbleSeed onto the base and repairing must reproduce the
          candidate gene for gene;
-       - a WILD card is allowed to differ anywhere EXCEPT the persona: age and gender
-         must equal the base's unless this is the persona step itself. That is what
-         keeps a wild card on topic instead of a fresh random face;
+       - a WILD card is allowed to differ only in this step's genes and the genes of
+         steps LATER in the walk: every gene owned by an EARLIER step (the persona
+         included – age and gender are step 1) must equal the base's. An element the
+         run already locked in stays locked; the wild jump only opens toward choices
+         still ahead;
        - the base object handed in is not mutated. */
   function elementVariantContract() {
     var Genome = window.Genome;
@@ -322,7 +324,6 @@
     var geneNames = Genome._internal.GENE_NAMES;
     var steps = Genome.ELEMENT_STEPS;
     var styleGenes = Genome.STYLE_GENES;
-    var personaGenes = Genome.PERSONA_GENES;
     var panelSize = Genome.PANEL_SIZE;
     var runs = 20, fails = [], candidates = 0;
 
@@ -348,7 +349,6 @@
         var variants = built && built.population;
         var meta = built && built.meta;
         var where = 'run ' + r + '/' + step.id + ': ';
-        var isPersonaStep = personaGenes.some(function (n) { return step.genes.indexOf(n) >= 0; });
 
         if (hash(base) !== beforeHash) fails.push(where + 'elementVariants mutated its input');
         if (!Array.isArray(variants) || variants.length !== panelSize) {
@@ -374,11 +374,13 @@
           if (hash(g) !== hash(Genome.repair(g))) fails.push(where + 'candidate ' + (c + 1) + ' is not repaired');
 
           if (meta[c] === 'wild') {
-            // a wild card may go anywhere except back out of the chosen persona
-            if (!isPersonaStep) {
-              personaGenes.forEach(function (n) {
+            // a wild card may only move this step's genes and later steps' – every gene
+            // owned by an earlier (already locked) step must still equal the base's
+            for (var pi = 0; pi < si; pi++) {
+              steps[pi].genes.forEach(function (n) {
                 if (g[n] !== base[n]) {
-                  fails.push(where + 'wild card ' + (c + 1) + ' changed the locked persona gene ' + n);
+                  fails.push(where + 'wild card ' + (c + 1) + ' changed the locked ' +
+                    steps[pi].id + ' gene ' + n);
                 }
               });
             }
@@ -405,7 +407,7 @@
       detail: fails.length === 0
         ? candidates + ' candidates over ' + steps.length + ' steps x ' + runs +
           ' bases: ' + panelSize + ' per step (1 anchor / 8 variants / 3 wild), cell 1 = base, ' +
-          'variant non-step diffs limited to style/wobbleSeed + repair consequences, wild personas locked'
+          'variant non-step diffs limited to style/wobbleSeed + repair consequences, wilds never touch earlier-step genes'
         : fails.slice(0, 5).join(' | ') + (fails.length > 5 ? ' …(+' + (fails.length - 5) + ' more)' : ''),
     };
   }
