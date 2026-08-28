@@ -116,6 +116,15 @@ var RETIRED_MODELS = {
   claude: 'claude-opus-4-8',
 };
 
+/* SETTINGS_VERSION – stamped into draw.settings by saveSettings. Version 2 marks the
+   one-time migration of a stored openai model 'gpt-5.6-sol' to the catalog default
+   (gpt-5.6-luna): before the catalog gained defaultModel, the silently-stored default
+   was the list's first entry (sol), and the RETIRED_MODELS migration can't touch it
+   because sol is still a curated model. The version gate makes the migration run at
+   most once, so a user who later picks sol ON PURPOSE keeps it (their save stamps v2). */
+var SETTINGS_VERSION = 2;
+var LEGACY_DEFAULT_MODELS = { openai: 'gpt-5.6-sol' };
+
 // ─── State ───
 
 var initialSettings = loadSettings(); // localStorage['draw.settings'] + ['draw.keys'], sane defaults on any failure
@@ -411,6 +420,7 @@ function loadSettings() {
   var keys = { gemini: '', openai: '', claude: '' };
   var manualMode = false;
   var migrated = false;
+  var storedVersion = 1;
   try {
     var rawSettings = window.localStorage.getItem('draw.settings');
     if (rawSettings) {
@@ -425,6 +435,7 @@ function loadSettings() {
           });
         }
         manualMode = parsedSettings.manualMode === true;
+        if (typeof parsedSettings.v === 'number') storedVersion = parsedSettings.v;
       }
     }
     PROVIDERS.forEach(function (p) {
@@ -432,9 +443,15 @@ function loadSettings() {
         models[p] = defaultModelFor(p);
         migrated = true;
       }
+      /* one-time (version-gated, see SETTINGS_VERSION) migration of a pre-defaultModel
+         stored default to the catalog default – e.g. openai gpt-5.6-sol -> gpt-5.6-luna */
+      if (storedVersion < 2 && models[p] === LEGACY_DEFAULT_MODELS[p]) {
+        models[p] = defaultModelFor(p);
+        migrated = true;
+      }
     });
-    if (migrated) {
-      window.localStorage.setItem('draw.settings', JSON.stringify({ provider: provider, models: models, manualMode: manualMode }));
+    if (migrated || storedVersion < SETTINGS_VERSION) {
+      window.localStorage.setItem('draw.settings', JSON.stringify({ provider: provider, models: models, manualMode: manualMode, v: SETTINGS_VERSION }));
     }
     var rawKeys = window.localStorage.getItem('draw.keys');
     if (rawKeys) {
@@ -457,6 +474,7 @@ function saveSettings() {
       provider: App.state.provider,
       models: App.state.models,
       manualMode: App.state.manualMode,
+      v: SETTINGS_VERSION,
     }));
   } catch (e) {
     // storage full/unavailable – settings just won't persist across reload
@@ -1171,10 +1189,32 @@ function render() {
   appEl.setAttribute('data-provider', s.provider);
   appEl.setAttribute('data-manual', s.manualMode ? 'true' : 'false');
 
+  /* render() rebuilds the whole DOM, which yanks focus (and the caret) out of
+     whatever field the user is typing in whenever an ASYNC state change lands
+     (model discovery resolving, a photo finishing). Remember the focused
+     element's id and caret, and restore both on the rebuilt twin below. */
+  var active = document.activeElement;
+  var activeId = active && active.id ? active.id : null;
+  var selStart = null, selEnd = null;
+  if (activeId && typeof active.selectionStart === 'number') {
+    selStart = active.selectionStart;
+    selEnd = active.selectionEnd;
+  }
+
   clearEl(appEl);
   appEl.appendChild(renderLeftColumn(s));
   appEl.appendChild(renderCenterColumn(s));
   appEl.appendChild(renderRightColumn(s));
+
+  if (activeId) {
+    var reborn = document.getElementById(activeId);
+    if (reborn) {
+      reborn.focus();
+      if (selStart !== null && typeof reborn.setSelectionRange === 'function') {
+        try { reborn.setSelectionRange(selStart, selEnd); } catch (e) { /* type without selection support */ }
+      }
+    }
+  }
 
   if (headerControlsEl) {
     clearEl(headerControlsEl);
@@ -1527,6 +1567,16 @@ function renderSettingsPanel(s) {
     placeholder: catalogProvider.keyPlaceholder || '',
   });
   keyInput.value = s.keys[s.provider];
+  /* per-keystroke silent commit: the key in state always matches the field, so an
+     async re-render (model discovery resolving, etc.) can never restore a stale key
+     over what was just typed – the "changed the key but the old one kept being sent"
+     bug. Deliberately no App.set (no re-render per keystroke) and no auto-heal here:
+     healing tests prefixes, and a half-typed 'sk-a…' must not get moved mid-typing.
+     The 'change' commit below still runs the heal + discovery on blur. */
+  keyInput.addEventListener('input', function () {
+    App.state.keys[App.state.provider] = keyInput.value;
+    saveKeys();
+  });
   keyInput.addEventListener('change', function () { onKeyChange(keyInput.value); });
   keyRow.appendChild(keyInput);
   if (catalogProvider.keyUrl) {
@@ -2149,6 +2199,7 @@ function onKeyChange(value) {
   keys[provider] = value;
 
   var note = null;
+  var healed = false;
   if (value) {
     var likely = window.AI_MODEL_CATALOG.keyLooksLike(value);
     if (likely && likely !== provider && !keys[likely]) {
@@ -2156,16 +2207,26 @@ function onKeyChange(value) {
       keys[likely] = value;
       keys[provider] = '';
       provider = likely;
+      healed = true;
       note = 'That looks like a ' + PROVIDER_LABELS[likely] + ' key - stored it for ' +
         PROVIDER_LABELS[likely] + ' and switched provider. Paste it again here to keep it under ' +
         originalProviderLabel + '.';
     }
   }
 
-  App.set({
-    provider: provider, keys: keys, settingsHighlight: false, settingsError: null, settingsKeyNote: note,
-  });
-  saveSettings(); // provider may have changed as part of the heal above
+  /* re-render only when something visible has to change (a heal moved the key, or a
+     stale error/note needs clearing). The per-keystroke 'input' commit above means the
+     plain path changes nothing – and skipping App.set here keeps the blur-triggered
+     commit from rebuilding the DOM under the very provider-select click that caused
+     the blur, which used to swallow that click. */
+  if (healed || s.settingsHighlight || s.settingsError || s.settingsKeyNote) {
+    App.set({
+      provider: provider, keys: keys, settingsHighlight: false, settingsError: null, settingsKeyNote: note,
+    });
+    saveSettings(); // provider may have changed as part of the heal above
+  } else {
+    App.state.keys = keys; // same values as the 'input' commits, kept for the direct-call path
+  }
   saveKeys(); // never logged – written straight to localStorage
   lastStartKeyWarning = null; // a fresh paste invalidates any pending "second press proceeds" state
   maybeDiscoverModels(provider); // Task 9 (review fix): triggered from this listener, not from render()
