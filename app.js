@@ -220,8 +220,9 @@ var App = {
 /* Task 13 auto-heal, persisted: if healKeys() above actually moved a key, write
    the corrected settings/keys back to localStorage immediately (before the first
    render) so the fix survives without the user having to touch anything, and a
-   reload doesn't repeat work loadSettings()+healKeys() already made idempotent. */
-if (initialHeal.healed) {
+   reload doesn't repeat work loadSettings()+healKeys() already made idempotent.
+   A cleared duplicate (see healKeys) is persisted the same way. */
+if (initialHeal.healed || initialHeal.cleared.length) {
   saveSettings();
   saveKeys();
 }
@@ -1585,7 +1586,10 @@ function renderSettingsPanel(s) {
   var keyRow = el('div', { class: 'settings-row' });
   keyRow.appendChild(el('label', { for: 'settings-key', text: PROVIDER_LABELS[s.provider] + ' API key' }));
   var keyInput = el('input', {
-    id: 'settings-key', type: 'password', autocomplete: 'off', spellcheck: 'false',
+    /* new-password, not off: Firefox and Chrome ignore autocomplete=off on password
+       fields and fill a saved login into whichever provider's field is showing,
+       which the 'input' commit below then saves under that provider */
+    id: 'settings-key', type: 'password', autocomplete: 'new-password', spellcheck: 'false',
     placeholder: catalogProvider.keyPlaceholder || '',
   });
   keyInput.value = s.keys[s.provider];

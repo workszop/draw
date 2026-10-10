@@ -113,7 +113,15 @@
      keyless and the LAST move's destination now has a key, the selected provider
      switches there too. Idempotent: a second call on the now-healed settings is a
      no-op, since every healed key now matches its new slot's own pattern. Never
-     logs a key value. */
+     logs a key value.
+
+     It also clears a slot holding an EXACT copy of the key already sitting in its
+     rightful slot (e.g. the Gemini key under claude as well as under gemini). That
+     shape comes from a browser password manager filling the key field: it fires a
+     real 'input' event, so the fill is saved under whichever provider is selected.
+     Clearing a copy loses nothing and leaves the selected provider alone; the
+     cleared slot ids are returned in `cleared`. A different key in the wrong slot
+     is still left in place for the inline warning, since it may be the only copy. */
   AI_MODEL_CATALOG.healKeys = function healKeys(settings) {
     var providerIds = Object.keys(AI_MODEL_CATALOG.providers);
     var keys = {};
@@ -122,6 +130,7 @@
     });
     var provider = settings && settings.provider;
     var lastHeal = null;
+    var cleared = [];
     var movedAny = true;
     while (movedAny) {
       movedAny = false;
@@ -133,6 +142,7 @@
         if (ownPattern && ownPattern.test(key)) continue; // fits its own slot already – nothing to heal
         var target = AI_MODEL_CATALOG.keyLooksLike(key);
         if (!target || target === p) continue; // no unambiguous match elsewhere (garbage key) – leave it alone
+        if (keys[target] === key) { keys[p] = ''; cleared.push(p); continue; } // duplicate of a correctly-slotted key
         if (keys[target]) continue; // destination occupied – never overwrite a non-empty slot
         keys[target] = key;
         keys[p] = '';
@@ -145,6 +155,7 @@
     return {
       settings: { provider: provider, models: settings && settings.models, keys: keys },
       healed: lastHeal,
+      cleared: cleared,
     };
   };
 
