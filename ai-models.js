@@ -14,7 +14,7 @@
     providers: {
       gemini: {
         label: 'Gemini',
-        models: ['gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.1-flash-lite-preview'],
+        models: ['gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.1-flash-lite-preview', 'gemini-3.5-flash-lite'],
         keyPlaceholder: 'AIza…',
         keyUrl: 'https://aistudio.google.com/apikey',
         // Task 13 (key-shape guard): what a Gemini key looks like, used to warn/auto-heal
@@ -58,6 +58,17 @@
         listPath: 'data',
       },
     },
+  };
+
+  /* freeModels / isFreeModel(provider, model): models that run without the visitor's
+     key, through the owner's proxy (see app.js judgeFree). Pattern from
+     ~/git-claude/zen/index.html (FREE_MODELS / isFreeModel). Deliberately
+     unadvertised: each sits in its provider's normal models list, is never a default,
+     and no UI text marks it; every key gate calls isFreeModel first. */
+  AI_MODEL_CATALOG.freeModels = { gemini: ['gemini-3.5-flash-lite'] };
+  AI_MODEL_CATALOG.isFreeModel = function isFreeModel(provider, model) {
+    var list = AI_MODEL_CATALOG.freeModels[provider] || [];
+    return typeof model === 'string' && list.indexOf(model) >= 0;
   };
 
   /* keyLooksLike(key) -> providerId|null (Task 13, pure, Node-testable via require).
@@ -151,7 +162,10 @@
         break; // restart the scan from the top so ordering never masks a second heal
       }
     }
-    if (lastHeal && !keys[provider] && keys[lastHeal.to]) provider = lastHeal.to;
+    /* a free model on the selected provider needs no key, so a keyless slot there is
+       no reason to move the visitor off it */
+    var selectedIsFree = AI_MODEL_CATALOG.isFreeModel(provider, settings && settings.models && settings.models[provider]);
+    if (lastHeal && !keys[provider] && keys[lastHeal.to] && !selectedIsFree) provider = lastHeal.to;
     return {
       settings: { provider: provider, models: settings && settings.models, keys: keys },
       healed: lastHeal,
