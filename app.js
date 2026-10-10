@@ -736,6 +736,9 @@ function judgeClaude(model, key, photoDataUrl, gridDataUrl, prompt) {
       ],
     }],
   };
+  if ((window.AI_MODEL_CATALOG.providers.claude.thinkingOptional || []).indexOf(model) >= 0) {
+    body.thinking = { type: 'disabled' };
+  }
   return fetch(url, {
     method: 'POST',
     headers: {
@@ -753,8 +756,11 @@ function judgeClaude(model, key, photoDataUrl, gridDataUrl, prompt) {
     }
     return res.json();
   }).then(function (data) {
-    var text = data && data.content && data.content[0] && data.content[0].text;
-    if (typeof text !== 'string') throw new Error('Claude reply had no text.');
+    /* thinking models may lead with a thinking block, so collect the text blocks
+       instead of assuming content[0] is the answer */
+    var text = (data && data.content || []).filter(function (b) { return b.type === 'text'; })
+      .map(function (b) { return b.text; }).join('');
+    if (!text) throw new Error('Claude reply had no text.');
     return text;
   });
 }

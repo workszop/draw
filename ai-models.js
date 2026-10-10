@@ -10,7 +10,7 @@
   'use strict';
 
   var AI_MODEL_CATALOG = {
-    defaultProvider: 'openai',
+    defaultProvider: 'claude',
     providers: {
       gemini: {
         label: 'Gemini',
@@ -44,7 +44,11 @@
       },
       claude: {
         label: 'Claude',
-        models: ['claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5'],
+        models: ['claude-opus-5', 'claude-sonnet-5', 'claude-haiku-5-5'],
+        defaultModel: 'claude-haiku-5-5',
+        // Models that think by default but accept thinking:{type:'disabled'} at their
+        // default effort: the judge's 500-token budget then goes entirely to the answer.
+        thinkingOptional: ['claude-haiku-5-5'],
         keyPlaceholder: 'sk-ant-…',
         keyUrl: 'https://console.anthropic.com/settings/keys',
         keyPattern: /^sk-ant-/,
