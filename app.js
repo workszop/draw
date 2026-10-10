@@ -128,9 +128,16 @@ var RETIRED_MODELS = {
    (gpt-5.6-luna): before the catalog gained defaultModel, the silently-stored default
    was the list's first entry (sol), and the RETIRED_MODELS migration can't touch it
    because sol is still a curated model. The version gate makes the migration run at
-   most once, so a user who later picks sol ON PURPOSE keeps it (their save stamps v2). */
-var SETTINGS_VERSION = 2;
-var LEGACY_DEFAULT_MODELS = { openai: 'gpt-5.6-sol' };
+   most once, so a user who later picks sol ON PURPOSE keeps it (their save stamps v2).
+   Version 3 does the same for the next default change: loadSettings stamps the default
+   into storage on a first visit, so a stored 'gpt-5.6-luna' is almost always that
+   silent default, and it moves to the catalog default (gpt-6-luna) once.
+   LEGACY_DEFAULT_MODELS maps each version to the defaults it retires. */
+var SETTINGS_VERSION = 3;
+var LEGACY_DEFAULT_MODELS = {
+  2: { openai: 'gpt-5.6-sol' },
+  3: { openai: 'gpt-5.6-luna' },
+};
 
 // ─── State ───
 
@@ -453,11 +460,13 @@ function loadSettings() {
         models[p] = defaultModelFor(p);
         migrated = true;
       }
-      /* one-time (version-gated, see SETTINGS_VERSION) migration of a pre-defaultModel
-         stored default to the catalog default – e.g. openai gpt-5.6-sol -> gpt-5.6-luna */
-      if (storedVersion < 2 && models[p] === LEGACY_DEFAULT_MODELS[p]) {
-        models[p] = defaultModelFor(p);
-        migrated = true;
+      /* one-time (version-gated, see SETTINGS_VERSION) migration of a silently stored
+         old default to the catalog default – e.g. openai gpt-5.6-luna -> gpt-6-luna */
+      for (var version in LEGACY_DEFAULT_MODELS) {
+        if (storedVersion < Number(version) && models[p] === LEGACY_DEFAULT_MODELS[version][p]) {
+          models[p] = defaultModelFor(p);
+          migrated = true;
+        }
       }
     });
     if (migrated || storedVersion < SETTINGS_VERSION) {

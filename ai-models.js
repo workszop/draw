@@ -31,8 +31,8 @@
         label: 'OpenAI',
         // Most-capable-first order (sol, terra, luna); the default model is
         // GPT Luna via defaultModel below, not by reordering this list.
-        models: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
-        defaultModel: 'gpt-5.6-luna',
+        models: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-6-luna'],
+        defaultModel: 'gpt-6-luna',
         keyPlaceholder: 'sk-…',
         keyUrl: 'https://platform.openai.com/api-keys',
         // negative lookahead excludes Claude's sk-ant- keys, which otherwise share the sk- prefix
